@@ -1,0 +1,23 @@
+meta {
+  name: Download LLM
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{dev}}/download_llm
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+      "url": "https://huggingface.co/TheBloke/stablelm-zephyr-3b-GGUF/resolve/main/stablelm-zephyr-3b.Q2_K.gguf?download=true",
+    "name":"stablelm-zephyr-3b-Q2"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}

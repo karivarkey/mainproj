@@ -1,0 +1,15 @@
+meta {
+  name: List RAGs
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{dev}}/rag/list
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+}

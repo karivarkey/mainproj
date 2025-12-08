@@ -1,0 +1,20 @@
+meta {
+  name: Inference to LLM
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{dev}}/infer
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {"text":"भारत का राष्ट्रपति कौन है?", "lang":"hi"}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}

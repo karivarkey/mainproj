@@ -1,0 +1,22 @@
+meta {
+  name: Load LLM
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{dev}}/load_llm
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+      "name": "stablelm-zephyr-3b-Q2"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}

@@ -1,0 +1,20 @@
+meta {
+  name: Direct Inference to LLM
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{dev}}/infer_raw
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {"prompt":"Who is the president of India?"}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}

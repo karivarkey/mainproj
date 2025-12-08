@@ -1,0 +1,22 @@
+meta {
+  name: Add Data to RAG
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{dev}}/rag/add
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+      "text": "The President of India as of 2025 is Ram Singh "
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
