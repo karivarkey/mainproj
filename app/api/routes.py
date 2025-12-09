@@ -8,6 +8,15 @@ from app.services.translator_service import translate
 from app.services.rag_service import rag_add, rag_remove, rag_retrieve, rag_list, rag_clear
 from app.services.benchmark_service import benchmark_pipeline
 
+
+def _clean_generation(text: str) -> str:
+    """Remove code fences and noisy prefixes from model output."""
+    cleaned = text
+    cleaned = re.sub(r"```.*?```", " ", cleaned, flags=re.S)  # drop fenced blocks
+    cleaned = re.sub(r"`+", "", cleaned)  # drop stray backticks
+    cleaned = re.sub(r"^\s*Answer\s*:\s*", "", cleaned, flags=re.I)  # drop leading Answer:
+    return cleaned.strip()
+
 bp = Blueprint("api", __name__)
 
 @bp.post("/download_llm")
@@ -86,13 +95,24 @@ def ep_infer():
     final_prompt = (
         f"User question:\n{english_text}\n\n"
         f"{context_block}"
-        "Answer clearly in simple English."
+        "Answer clearly in simple English. Do not use code fences or Markdown. Respond with plain text only."
     )
 
     # 4/5. Run inference and (optionally) stream translations back
     if not stream:
         # Non-streaming (legacy) behaviour
-        llm_output_en = llm_generate(final_prompt, max_new_tokens=max_tokens)
+        try:
+            llm_output_en = llm_generate(final_prompt, max_new_tokens=max_tokens)
+            llm_output_en = _clean_generation(llm_output_en)
+        except RuntimeError as e:
+            if "llama_decode returned -1" in str(e):
+                return jsonify({
+                    "error": "LLM generation failed due to context/memory limits",
+                    "details": str(e),
+                    "suggestion": "Try loading the model with a larger n_ctx or reduce max_new_tokens"
+                }), 503
+            raise
+        
         answer_native = translate(llm_output_en, "en", src_lang)
         return jsonify({
             "input": text,
@@ -124,16 +144,21 @@ def ep_infer():
                     buffer = buffer[m.end():]
                     if not sent:
                         continue
-                    # translate the sentence back to the user's language
-                    translated = translate(sent, "en", src_lang)
-                    payload = {"type": "sentence", "english": sent, "translated": translated}
+                    # clean and translate the sentence back to the user's language
+                    sent_clean = _clean_generation(sent)
+                    if not sent_clean:
+                        continue
+                    translated = translate(sent_clean, "en", src_lang)
+                    payload = {"type": "sentence", "english": sent_clean, "translated": translated}
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
             # flush remaining buffer
             if buffer.strip():
                 sent = buffer.strip()
-                translated = translate(sent, "en", src_lang)
-                payload = {"type": "sentence", "english": sent, "translated": translated}
+                sent_clean = _clean_generation(sent)
+                if sent_clean:
+                    translated = translate(sent_clean, "en", src_lang)
+                    payload = {"type": "sentence", "english": sent_clean, "translated": translated}
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
             yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"

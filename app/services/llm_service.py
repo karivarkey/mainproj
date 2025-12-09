@@ -84,21 +84,66 @@ def unload_llm():
     print("LLM unloaded.")
 
 
-def llm_generate(prompt: str, max_new_tokens: int = 128) -> str:
+def reset_llm_context():
+    """Clear the KV cache and context from the current LLM to free memory."""
+    global current_llm
+    if current_llm is None:
+        return
+    try:
+        current_llm.reset()
+        print("[LLM] Context cleared.")
+    except Exception as e:
+        print(f"[LLM] Warning: Could not reset context: {e}")
+
+
+def llm_generate(
+    prompt: str,
+    max_new_tokens: int = 128,
+    temperature: float = 0.3,
+    top_p: float = 0.9,
+    top_k: int = 40,
+    repeat_penalty: float = 1.1,
+    stop: list[str] | None = None,
+) -> str:
     if current_llm is None:
         raise RuntimeError("LLM not loaded")
 
-    response = current_llm(
-        prompt,
-        max_tokens=max_new_tokens,
-        stop=["</s>"],
-        echo=False,
-    )
+    stop = stop or ["</s>", "```"]
 
-    return response["choices"][0]["text"]
+    try:
+        response = current_llm(
+            prompt,
+            max_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repeat_penalty=repeat_penalty,
+            stop=stop,
+            echo=False,
+        )
+        result = response["choices"][0]["text"]
+        # Clear context after generation to prevent buildup
+        reset_llm_context()
+        return result
+    except RuntimeError as e:
+        if "llama_decode returned -1" in str(e):
+            raise RuntimeError(
+                f"LLM generation failed: context or memory limit exceeded.\n"
+                f"Try reducing max_new_tokens (currently {max_new_tokens}) or "
+                f"increasing n_ctx when loading the model."
+            ) from e
+        raise
 
 
-def llm_generate_stream(prompt: str, max_new_tokens: int = 128):
+def llm_generate_stream(
+    prompt: str,
+    max_new_tokens: int = 128,
+    temperature: float = 0.3,
+    top_p: float = 0.9,
+    top_k: int = 40,
+    repeat_penalty: float = 1.1,
+    stop: list[str] | None = None,
+):
     """
     Stream generation from the current Llama instance.
     Yields text chunks (strings) as they are produced by the model.
@@ -111,30 +156,48 @@ def llm_generate_stream(prompt: str, max_new_tokens: int = 128):
     # The llama_cpp client supports streaming; calling with stream=True
     # returns an iterator of chunks (often dicts). We yield the text
     # content from each chunk.
-    for chunk in current_llm(
-        prompt,
-        max_tokens=max_new_tokens,
-        stop=["</s>"],
-        echo=False,
-        stream=True,
-    ):
-        try:
-            # chunk may be a dict with choices -> text, or a simple string
-            if isinstance(chunk, dict):
-                choices = chunk.get("choices") or []
-                if choices:
-                    # Common shape: {'choices': [{'text': '...'}]}
-                    text = choices[0].get("text") or ""
-                else:
-                    # Fallback: try top-level text
-                    text = chunk.get("text", "")
-            elif isinstance(chunk, str):
-                text = chunk
-            else:
-                text = str(chunk)
-        except Exception:
-            # Ignore malformed chunks
-            continue
+    stop = stop or ["</s>", "```"]
 
-        if text:
-            yield text
+    try:
+        for chunk in current_llm(
+            prompt,
+            max_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repeat_penalty=repeat_penalty,
+            stop=stop,
+            echo=False,
+            stream=True,
+        ):
+            try:
+                # chunk may be a dict with choices -> text, or a simple string
+                if isinstance(chunk, dict):
+                    choices = chunk.get("choices") or []
+                    if choices:
+                        # Common shape: {'choices': [{'text': '...'}]}
+                        text = choices[0].get("text") or ""
+                    else:
+                        # Fallback: try top-level text
+                        text = chunk.get("text", "")
+                elif isinstance(chunk, str):
+                    text = chunk
+                else:
+                    text = str(chunk)
+            except Exception:
+                # Ignore malformed chunks
+                continue
+
+            if text:
+                yield text
+        
+        # Clear context after streaming generation completes
+        reset_llm_context()
+    except RuntimeError as e:
+        if "llama_decode returned -1" in str(e):
+            raise RuntimeError(
+                f"LLM streaming generation failed: context or memory limit exceeded.\n"
+                f"Try reducing max_new_tokens (currently {max_new_tokens}) or "
+                f"increasing n_ctx when loading the model."
+            ) from e
+        raise
