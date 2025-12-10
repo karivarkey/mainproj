@@ -5,11 +5,17 @@ meta {
 }
 
 get {
-  url: {{dev}}/benchmark
+  url: {{dev}}/benchmark?a=MODEL_A&b=MODEL_B
   body: none
   auth: inherit
 }
 
+params:query {
+  a: MODEL_A
+  b: MODEL_B
+}
+
 settings {
   encodeUrl: true
+  timeout: 0
 }

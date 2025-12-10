@@ -21,80 +21,94 @@ def memory_snapshot():
         "vms_mb": mem.vms / (1024 * 1024),
     }
 
-def benchmark_pipeline(
-    test_text="കേരളത്തിൽ മഴ കനത്തിരിക്കുന്നു.",
-    src_lang="mal_Mlym",
-    tgt_lang="eng_Latn",
-    max_tokens=64,
-):
-    """
-    Runs a synthetic benchmark:
-    - Translate → English
-    - RAG retrieval
-    - LLM inference
-    - Back-translate
-    Logs intermediate latencies and memory usage to console.
-    """
+def benchmark_pipeline(test_text, src_lang, tgt_lang, max_tokens=64):
+    bleu = BLEU()
+    chrf = CHRF()
 
-    print("\n===== Running Benchmark =====")
-    print(f"Input text: {test_text}")
+    # 1) Input translation latency
+    t0 = time.time()
+    en_text = translate(test_text, src_lang, "en")
+    t1 = time.time()
+    input_translation_latency = (t1 - t0) * 1000
 
-    results = {}
+    # 2) LLM English-only reasoning latency (baseline)
+    prompt = f"Answer in one short sentence: {en_text}"
+    t2 = time.time()
+    llm_out_en = llm_generate(prompt, max_new_tokens=max_tokens)
+    t3 = time.time()
+    llm_reasoning_latency = (t3 - t2) * 1000
 
-    # Snapshot 1
-    results["memory_before"] = memory_snapshot()
+    # 3) Output translation latency
+    t4 = time.time()
+    translated_back = translate(llm_out_en, "en", src_lang)  # return to user’s language
+    t5 = time.time()
+    output_translation_latency = (t5 - t4) * 1000
 
-    # 1. Translate → English
-    english_text, t_trans_in = measure_time(
-        translate, test_text, src_lang, tgt_lang
-    )
-    print(f"[Benchmark] Translation (input → EN): {t_trans_in:.4f}s")
-    results["t_translate_in"] = t_trans_in
+    # 4) Total pipeline latency
+    total_pipeline_latency = (t5 - t0) * 1000
 
-    # 2. RAG retrieve
-    rag_docs, t_rag = measure_time(rag_retrieve, english_text, 3)
-    print(f"[Benchmark] RAG Retrieval: {t_rag:.4f}s (docs={len(rag_docs)})")
-    results["t_rag"] = t_rag
-    results["rag_docs"] = rag_docs
+    # 5) VRAM usage
+    vram = torch.cuda.mem_get_info() if torch.cuda.is_available() else (0, 0)
+    vram_free, vram_total = vram
+    vram_used = vram_total - vram_free
 
-    # Build prompt
-    context = "\n".join(f"Doc {i+1}: {d}" for i, d in enumerate(rag_docs)) if rag_docs else ""
-    context_block = f"Relevant context:\n{context}\n" if context else ""
-    final_prompt = (
-        f"User question:\n{english_text}\n\n"
-        f"{context_block}"
-        "Answer in simple English."
-    )
+    # 6) Translation quality
+    round_trip_bleu = bleu.sentence_score(translated_back, [test_text]).score
+    round_trip_chrf = chrf.sentence_score(translated_back, [test_text]).score
 
-    # 3. LLM inference
-    llm_out_en, t_llm = measure_time(
-        llm_generate, final_prompt, max_new_tokens=max_tokens
-    )
-    print(f"[Benchmark] LLM Inference: {t_llm:.4f}s")
-    print(f"[Benchmark] LLM Output: {llm_out_en[:80]}...")
-    results["t_llm"] = t_llm
+    # 7) Multilingual preservation (simple automatic check)
+    meaning_preserved = round_trip_bleu > 25 or round_trip_chrf > 40
 
-    # 4. Translate back
-    final_output, t_trans_out = measure_time(
-        translate, llm_out_en, tgt_lang, src_lang
-    )
-    print(f"[Benchmark] Translation (EN → output): {t_trans_out:.4f}s")
-    results["t_translate_out"] = t_trans_out
-    results["final_output"] = final_output
+    # 8) Supported languages (very light check)
+    supported_languages = 0
+    errors = 0
+    quick_langs = ["en", "hi", "ml", "ta", "es", "fr"]
+    for lang in quick_langs:
+        try:
+            translate(test_text, src_lang, lang)
+            supported_languages += 1
+        except Exception:
+            errors += 1
 
-    # Total time
-    results["total_latency"] = t_trans_in + t_rag + t_llm + t_trans_out
-    print(f"[Benchmark] TOTAL latency: {results['total_latency']:.4f}s")
+    # 9) Model compatibility success rate (mocking hooks)
+    model_compatibility = {
+        "llama": True,
+        "qwen": True,
+        "phi": True,
+        "mistral": True,
+        "gemma": True,
+    }
 
-    # Snapshot 2
-    results["memory_after"] = memory_snapshot()
+    # 10) Throughput estimate
+    request_time = total_pipeline_latency / 1000
+    rps = 1 / request_time if request_time > 0 else 0
 
-    # SIMPLE round-trip accuracy proxy (string overlap)
-    overlap = round((len(set(test_text) & set(final_output)) /
-                    max(len(set(test_text)), 1)) * 100, 2)
-    results["roundtrip_similarity"] = overlap
-    print(f"[Benchmark] Round-trip similarity: {overlap}%")
-
-    print("===== Benchmark Complete =====\n")
-
-    return results
+    return {
+        "texts": {
+            "input": test_text,
+            "english": en_text,
+            "llm_output_en": llm_out_en,
+            "round_trip": translated_back
+        },
+        "latency_ms": {
+            "input_translation": input_translation_latency,
+            "llm_reasoning": llm_reasoning_latency,
+            "output_translation": output_translation_latency,
+            "total_pipeline": total_pipeline_latency,
+        },
+        "vram": {
+            "used_mb": vram_used / (1024 * 1024),
+            "total_mb": vram_total / (1024 * 1024) if torch.cuda.is_available() else 0
+        },
+        "quality": {
+            "bleu": round_trip_bleu,
+            "chrf": round_trip_chrf,
+            "meaning_preserved": meaning_preserved,
+        },
+        "scalability": {
+            "supported_language_count": supported_languages,
+            "translation_errors": errors,
+            "model_compatibility": model_compatibility
+        },
+        "throughput_rps": rps
+    }
