@@ -3,6 +3,7 @@ import psutil
 import json
 import gc
 import torch
+from sacrebleu.metrics import BLEU, CHRF
 from app.services.translator_service import translate, unload_translator
 from app.services.llm_service import llm_generate, load_llm, unload_llm
 from app.services.rag_service import rag_add, rag_clear

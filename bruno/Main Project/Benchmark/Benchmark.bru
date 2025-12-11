@@ -4,15 +4,49 @@ meta {
   seq: 1
 }
 
-get {
-  url: {{dev}}/benchmark?a=MODEL_A&b=MODEL_B
-  body: none
+post {
+  url: {{dev}}/benchmark/resource
+  body: json
   auth: inherit
 }
 
-params:query {
-  a: MODEL_A
-  b: MODEL_B
+body:json {
+  {
+      "llm_name": "Qwen2-500M-Instruct-GGUF",
+      "prompts": [
+          {
+              "text": "भारतीय संविधान की मुख्य विशेषताएं क्या हैं?",
+              "lang": "hi"
+          },
+          {
+              "text": "Explain the concept of quantum entanglement and its potential applications.",
+              "lang": "en"
+          },
+          {
+              "text": "இலங்கை அரசியலமைப்பின் ஏழாவது திருத்தம் பற்றி விளக்கவும்.",
+              "lang": "ta"
+          },
+          {
+              "text": "Was sind die Hauptunterschiede zwischen klassischer und quantenmechanischer Physik?",
+              "lang": "de"
+          },
+          {
+              "text": "¿Cómo funciona un reactor de fusión nuclear Tokamak?",
+              "lang": "es"
+          }
+      ],
+      "rag_data": [
+          "Quantum Entanglement is a phenomenon where two or more particles become linked in such a way that measuring the state of one instantly influences the state of the other, regardless of the distance separating them. This is key to quantum computing.",
+          "A Tokamak is a device that uses a powerful magnetic field to confine plasma in the shape of a torus, in order to achieve the necessary conditions for controlled thermonuclear fusion.",
+          "The Constitution of India is the longest written constitution of any sovereign country in the world. Key features include a Federal System with Unitary Bias, Parliamentary Form of Government, Fundamental Rights, and Directive Principles of State Policy.",
+          "The 7th Amendment to the Sri Lankan Constitution deals with the establishment of the Supreme Court and the Court of Appeal.",
+          "Classical physics describes the motion of macroscopic objects, while quantum mechanics describes the behavior of matter at the atomic and subatomic level, often with counter-intuitive results like wave-particle duality.",
+          "Fusion energy, if harnessed, promises a clean and virtually limitless source of power, as its fuel (isotopes of hydrogen) is abundant."
+      ],
+      "n_ctx": 4096,
+      "n_gpu_layers": -1,
+      "max_tokens": 512
+  }
 }
 
 settings {

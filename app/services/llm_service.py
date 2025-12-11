@@ -1,6 +1,15 @@
 from pathlib import Path
 from llama_cpp import Llama
-from app.config import LLM_DIR
+from app.config import (
+    LLM_DIR,
+    LLM_DEFAULT_N_CTX,
+    LLM_DEFAULT_N_GPU_LAYERS,
+    LLM_DEFAULT_TEMPERATURE,
+    LLM_DEFAULT_TOP_P,
+    LLM_DEFAULT_TOP_K,
+    LLM_DEFAULT_REPEAT_PENALTY,
+    LLM_DEFAULT_MAX_TOKENS
+)
 from app.services.cache_service import model_cache, save_cache
 
 current_llm: Llama | None = None
@@ -44,8 +53,13 @@ def download_gguf(url: str, model_name: str) -> Path:
     return dest
 
 
-def load_llm(model_name: str, n_ctx: int = 4096, n_gpu_layers: int = -1):
+def load_llm(model_name: str, n_ctx: int = None, n_gpu_layers: int = None):
     global current_llm, current_name, current_path
+    
+    if n_ctx is None:
+        n_ctx = LLM_DEFAULT_N_CTX
+    if n_gpu_layers is None:
+        n_gpu_layers = LLM_DEFAULT_N_GPU_LAYERS
 
     gguf_path = local_gguf_path(model_name)
     if not gguf_path.exists():
@@ -98,13 +112,23 @@ def reset_llm_context():
 
 def llm_generate(
     prompt: str,
-    max_new_tokens: int = 128,
-    temperature: float = 0.3,
-    top_p: float = 0.9,
-    top_k: int = 40,
-    repeat_penalty: float = 1.1,
+    max_new_tokens: int = None,
+    temperature: float = None,
+    top_p: float = None,
+    top_k: int = None,
+    repeat_penalty: float = None,
     stop: list[str] | None = None,
 ) -> str:
+    if max_new_tokens is None:
+        max_new_tokens = LLM_DEFAULT_MAX_TOKENS
+    if temperature is None:
+        temperature = LLM_DEFAULT_TEMPERATURE
+    if top_p is None:
+        top_p = LLM_DEFAULT_TOP_P
+    if top_k is None:
+        top_k = LLM_DEFAULT_TOP_K
+    if repeat_penalty is None:
+        repeat_penalty = LLM_DEFAULT_REPEAT_PENALTY
     if current_llm is None:
         raise RuntimeError("LLM not loaded")
 
@@ -137,13 +161,23 @@ def llm_generate(
 
 def llm_generate_stream(
     prompt: str,
-    max_new_tokens: int = 128,
-    temperature: float = 0.3,
-    top_p: float = 0.9,
-    top_k: int = 40,
-    repeat_penalty: float = 1.1,
+    max_new_tokens: int = None,
+    temperature: float = None,
+    top_p: float = None,
+    top_k: int = None,
+    repeat_penalty: float = None,
     stop: list[str] | None = None,
 ):
+    if max_new_tokens is None:
+        max_new_tokens = LLM_DEFAULT_MAX_TOKENS
+    if temperature is None:
+        temperature = LLM_DEFAULT_TEMPERATURE
+    if top_p is None:
+        top_p = LLM_DEFAULT_TOP_P
+    if top_k is None:
+        top_k = LLM_DEFAULT_TOP_K
+    if repeat_penalty is None:
+        repeat_penalty = LLM_DEFAULT_REPEAT_PENALTY
     """
     Stream generation from the current Llama instance.
     Yields text chunks (strings) as they are produced by the model.

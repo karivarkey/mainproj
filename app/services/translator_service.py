@@ -3,8 +3,13 @@ import torch
 from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from transformers import BitsAndBytesConfig
-import os
-from app.config import DEVICE, TRANS_DIR
+from app.config import (
+    DEVICE, 
+    TRANS_DIR, 
+    NLLB_MODEL, 
+    NLLB_LANG_MAP, 
+    TRANSLATOR_QUANTIZE
+)
 from app.services.cache_service import model_cache, save_cache
 
 sys.excepthook = lambda exc_type, exc, tb: (
@@ -12,37 +17,7 @@ sys.excepthook = lambda exc_type, exc, tb: (
     __import__('traceback').print_tb(tb)
 )
 
-
 translator_cache = {}
-
-# Quantization mode for translators: 'none', '8bit', or '4bit'.
-# Can be overridden via env var `TRANSLATOR_QUANTIZE`.
-TRANSLATOR_QUANTIZE = os.environ.get("TRANSLATOR_QUANTIZE", "8bit")
-
-# NLLB model: smaller, faster, multilingual
-NLLB_MODEL = "facebook/nllb-200-distilled-600M"
-
-# NLLB language codes (ISO 639-3 with script)
-NLLB_LANG_MAP = {
-    "hi": "hin_Deva",      # Hindi
-    "en": "eng_Latn",      # English
-    "ta": "tam_Taml",      # Tamil
-    "te": "tel_Telu",      # Telugu
-    "ka": "kan_Knda",      # Kannada
-    "ml": "mal_Mlym",      # Malayalam
-    "mr": "mar_Deva",      # Marathi
-    "gu": "guj_Gujr",      # Gujarati
-    "bn": "ben_Beng",      # Bengali
-    "pa": "pan_Guru",      # Punjabi
-    "ur": "urd_Arab",      # Urdu
-    "fr": "fra_Latn",      # French
-    "de": "deu_Latn",      # German
-    "es": "spa_Latn",      # Spanish
-    "pt": "por_Latn",      # Portuguese
-    "ja": "jpn_Jpan",      # Japanese
-    "zh": "zho_Hans",      # Chinese (Simplified)
-    "ru": "rus_Cyrl",      # Russian
-}
 
 
 def local_translator_path(model_id: str) -> Path:

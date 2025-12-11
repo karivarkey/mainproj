@@ -3,18 +3,25 @@ import json
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from app.config import RAG_INDEX_FILE, RAG_META_FILE
+from app.config import (
+    RAG_INDEX_FILE, 
+    RAG_META_FILE, 
+    RAG_EMBEDDING_MODEL, 
+    RAG_EMBEDDING_DIM,
+    RAG_SIMILARITY_THRESHOLD,
+    RAG_TOP_K
+)
 
 # Lazy-load embedding model to avoid import errors at startup
 embed_model = None
-DIM = 768  # Default for paraphrase-mpnet-base-v2
+DIM = RAG_EMBEDDING_DIM
 
 def get_embed_model():
     """Lazy-load the embedding model on first use."""
     global embed_model, DIM
     if embed_model is None:
         try:
-            embed_model = SentenceTransformer("sentence-transformers/paraphrase-mpnet-base-v2")
+            embed_model = SentenceTransformer(RAG_EMBEDDING_MODEL)
             DIM = embed_model.get_sentence_embedding_dimension()
         except Exception as e:
             print(f"Warning: Failed to load embedding model: {e}")
@@ -72,7 +79,12 @@ def rag_remove(doc_id: str):
     save_rag_state()
     return True
 
-def rag_retrieve(query: str, top_k=3, similarity_threshold=0.35):
+def rag_retrieve(query: str, top_k=None, similarity_threshold=None):
+    if top_k is None:
+        top_k = RAG_TOP_K
+    if similarity_threshold is None:
+        similarity_threshold = RAG_SIMILARITY_THRESHOLD
+    
     if len(rag_meta) == 0:
         return []
     
