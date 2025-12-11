@@ -32,8 +32,9 @@ Developer workflows and commands
 - Download LLMs:
   - Use the API: POST `/download_llm` with `{ "url":..., "name":... }` (handled by `llm_service.download_gguf`).
   - Or drop a `.gguf` into `models/llms/` (name must match `llm_service.local_gguf_path` logic).
-- Translators: `translator_service.download_translator()` caches tokens and model weights into `models/translators/` (tokenizers still fetched from HF by default).
+- Translators: `translator_service.download_translator()` caches tokens and model weights into `models/translators/` (tokenizers still fetched from HF by default). Quantization mode controlled by env var `TRANSLATOR_QUANTIZE` (8bit, 4bit, or none).
 - Quick translation harness: [test.py](test.py) demonstrates batch translation and model initialization for offline experiments — useful when testing translators outside Flask.
+- Resource benchmarks: POST `/benchmark/resource` with `llm_name`, `prompts`, and optional `rag_data` to measure RAM/CPU/VRAM usage at each stage (baseline, LLM load, translator load, RAG load, per-prompt inference).
 
 Project-specific conventions
 - Single shared `model_cache` (in `cache_service`) records available `llms` and `translators`. Always update via `save_cache(model_cache)` when adding entries.

@@ -1,0 +1,30 @@
+meta {
+  name: Resource Usage Benchmark
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{base_url}}/benchmark/resource
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "llm_name": "Qwen2-500M-Instruct-GGUF",
+    "prompts": [
+      {"text": "भारत का राष्ट्रपति कौन है?", "lang": "hi"},
+      {"text": "What is artificial intelligence?", "lang": "en"},
+      {"text": "Explique o que é inteligência artificial.", "lang": "pt"}
+    ],
+    "rag_data": [
+      "Artificial intelligence (AI) is the simulation of human intelligence by machines.",
+      "Machine learning is a subset of AI that enables systems to learn from data.",
+      "Neural networks are computing systems inspired by biological neural networks."
+    ],
+    "n_ctx": 4096,
+    "n_gpu_layers": -1,
+    "max_tokens": 128
+  }
+}

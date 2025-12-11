@@ -6,7 +6,7 @@ from app.services.cache_service import model_cache
 from app.services.llm_service import download_gguf, load_llm_from_gguf, llm_generate, llm_generate_stream, unload_llm, current_name, SERVER_URL
 from app.services.translator_service import translate
 from app.services.rag_service import rag_add, rag_remove, rag_retrieve, rag_list, rag_clear
-from app.services.benchmark_service import benchmark_pipeline
+from app.services.benchmark_service import benchmark_pipeline, benchmark_resource_usage
 
 
 def _clean_generation(text: str) -> str:
@@ -265,3 +265,59 @@ def ep_benchmark():
                 "suggestion": "Try: pip install --upgrade transformers torch torchvision"
             }), 503
         raise
+
+
+@bp.post("/benchmark/resource")
+def ep_benchmark_resource():
+    """
+    Comprehensive resource usage benchmark endpoint.
+    
+    Request body:
+    {
+        "llm_name": "Qwen2-500M-Instruct-GGUF",
+        "prompts": [
+            {"text": "भारत का राष्ट्रपति कौन है?", "lang": "hi"},
+            {"text": "What is machine learning?", "lang": "en"}
+        ],
+        "rag_data": ["AI is artificial intelligence", "ML is machine learning"],  // optional
+        "n_ctx": 4096,         // optional, default 4096
+        "n_gpu_layers": -1,    // optional, default -1 (all)
+        "max_tokens": 128      // optional, default 128
+    }
+    
+    Returns comprehensive metrics for:
+    - Baseline (unloaded)
+    - LLM loaded
+    - Translator loaded
+    - RAG data loaded
+    - Per-prompt full pipeline (translate→infer→translate back) with time, RAM, CPU, VRAM
+    """
+    body = request.get_json() or {}
+    
+    llm_name = body.get("llm_name")
+    prompts = body.get("prompts", [])
+    rag_data = body.get("rag_data", None)
+    n_ctx = int(body.get("n_ctx", 4096))
+    n_gpu_layers = int(body.get("n_gpu_layers", -1))
+    max_tokens = int(body.get("max_tokens", 128))
+    
+    if not llm_name:
+        return jsonify({"error": "llm_name required"}), 400
+    if not prompts or not isinstance(prompts, list):
+        return jsonify({"error": "prompts must be a non-empty list"}), 400
+    
+    try:
+        results = benchmark_resource_usage(
+            llm_name=llm_name,
+            prompts=prompts,
+            rag_data=rag_data,
+            n_ctx=n_ctx,
+            n_gpu_layers=n_gpu_layers,
+            max_tokens=max_tokens
+        )
+        return jsonify({"ok": True, "results": results})
+    except Exception as e:
+        return jsonify({
+            "error": "benchmark failed",
+            "details": str(e)
+        }), 500

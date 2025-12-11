@@ -222,3 +222,25 @@ def translate(text: str, src_lang: str, tgt_lang: str, max_tokens: int = 256) ->
 
     print(f"Output: {output[:100]}..." if len(output) > 100 else f"Output: {output}\n")
     return output
+
+
+def unload_translator(model_id: str = NLLB_MODEL):
+    """
+    Unload a translator from cache to free VRAM/RAM.
+    Safe for both quantized and non-quantized models.
+    """
+    cache_key = f"{model_id}__{TRANSLATOR_QUANTIZE}"
+    entry = translator_cache.pop(cache_key, None)
+    if entry:
+        tok, model, device = entry
+        try:
+            del tok
+            del model
+        except Exception as e:
+            print(f"[NLLB] Warning during unload: {e}")
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print(f"[NLLB] Unloaded translator: {model_id}")
+        return True
+    return False
