@@ -335,6 +335,27 @@ def ep_rag_clear():
     rag_clear()
     return jsonify({"ok": True, "message": "All RAG documents cleared"})
 
+@bp.post("/rag/search")
+def ep_rag_search():
+    """Search RAG documents by query and return top-k matches."""
+    body = request.get_json() or {}
+    query = body.get("query")
+    top_k = int(body.get("top_k", 3))
+    similarity_threshold = float(body.get("similarity_threshold", 0.35))
+    
+    if not query:
+        return jsonify({"error": "query required"}), 400
+    
+    results = rag_retrieve(query, top_k=top_k, similarity_threshold=similarity_threshold)
+    return jsonify({
+        "ok": True,
+        "query": query,
+        "top_k": top_k,
+        "similarity_threshold": similarity_threshold,
+        "results": results,
+        "count": len(results)
+    })
+
 @bp.post("/unload_llm")
 def ep_unload_llm():
     """Stop the background llama-server."""
