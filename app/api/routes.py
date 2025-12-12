@@ -7,7 +7,7 @@ import psutil
 from app.config import LANG_MAP, LANG_ALIASES, NLLB_LANG_MAP
 from app.services.cache_service import model_cache
 from app.services.llm_service import download_gguf, load_llm_from_gguf, llm_generate, llm_generate_stream, unload_llm, get_current_name, SERVER_URL
-from app.services.translator_service import translate, detect_supported_language
+from app.services.translator_service import translate, detect_supported_language, unload_translator
 from app.services.rag_service import rag_add, rag_remove, rag_retrieve, rag_list, rag_clear
 from app.services.benchmark_service import benchmark_pipeline, benchmark_resource_usage
 
@@ -461,7 +461,12 @@ def ep_rag_search():
 def ep_unload_llm():
     """Stop the background llama-server."""
     unload_llm()
-    return jsonify({"ok": True, "message": "LLM server stopped"})
+    translator_unloaded = unload_translator()
+    return jsonify({
+        "ok": True,
+        "message": "LLM server stopped and translator unloaded",
+        "translator_unloaded": bool(translator_unloaded)
+    })
 
 @bp.get("/benchmark")
 def ep_benchmark():
