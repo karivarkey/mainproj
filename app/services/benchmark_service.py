@@ -3,11 +3,13 @@ import psutil
 import json
 import gc
 import re
+import os
 import torch
+from pathlib import Path
 from sacrebleu.metrics import BLEU, CHRF
-from app.config import CPU_ONLY
+from app.config import CPU_ONLY, LLM_DIR
 from app.services.translator_service import translate, unload_translator
-from app.services.llm_service import llm_generate, llm_generate_stream, load_llm, unload_llm
+from app.services.llm_service import llm_generate, llm_generate_stream, load_llm, unload_llm, local_gguf_path
 from app.services.rag_service import rag_add, rag_clear
 
 def measure_time(fn, *args, **kwargs):
@@ -434,4 +436,135 @@ def benchmark_resource_usage(
         }
     
     print("[BENCHMARK] Complete!")
+
+def benchmark_llm_metrics(llm_name: str, n_ctx: int = 4096, n_gpu_layers: int = -1, max_tokens: int = 128):
+    """
+    Comprehensive LLM performance metrics benchmark.
+    
+    Measures:
+    - Model size (GB)
+    - Load time (seconds)
+    - First token latency (ms)
+    - Tokens per second
+    - Peak RAM usage (MB)
+    - Output length (tokens)
+    
+    Uses a predefined complex question for consistent benchmarking.
+    """
+    DEMO_PROMPT = (
+        "Explain the concept of quantum entanglement and its implications "
+        "for quantum computing in a detailed manner."
+    )
+    
+    # Ensure we start clean
+    unload_llm()
+    unload_translator()
+    gc.collect()
+    if torch.cuda.is_available() and not CPU_ONLY:
+        torch.cuda.empty_cache()
+    
+    time.sleep(1)  # Let system stabilize
+    
+    results = {}
+    
+    # 1. Model size
+    try:
+        model_path = local_gguf_path(llm_name)
+        if not model_path.exists():
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+        model_size_bytes = model_path.stat().st_size
+        model_size_gb = model_size_bytes / (1024 ** 3)
+        results["model_size_gb"] = round(model_size_gb, 3)
+        results["model_path"] = str(model_path)
+    except Exception as e:
+        return {"error": f"Failed to get model size: {e}"}
+    
+    # Baseline memory before loading
+    baseline_mem = memory_snapshot()
+    
+    # 2. Load time
+    try:
+        load_start = time.perf_counter()
+        load_llm(llm_name, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers)
+        load_end = time.perf_counter()
+        load_time_s = load_end - load_start
+        results["load_time_s"] = round(load_time_s, 3)
+    except Exception as e:
+        unload_llm()
+        return {"error": f"Failed to load model: {e}"}
+    
+    # Memory after loading
+    loaded_mem = memory_snapshot()
+    
+    # 3-6. Inference metrics using streaming
+    process = psutil.Process()
+    peak_rss = process.memory_info().rss
+    
+    try:
+        # Track first token latency
+        first_token_time = None
+        inference_start = time.perf_counter()
+        token_count = 0
+        output_text = ""
+        
+        for chunk in llm_generate_stream(DEMO_PROMPT, max_new_tokens=max_tokens):
+            if first_token_time is None:
+                first_token_time = time.perf_counter()
+            output_text += chunk
+            token_count += 1
+            
+            # Update peak memory
+            current_rss = process.memory_info().rss
+            peak_rss = max(peak_rss, current_rss)
+        
+        inference_end = time.perf_counter()
+        
+        # Calculate metrics
+        first_token_latency_ms = ((first_token_time - inference_start) * 1000) if first_token_time else 0
+        total_inference_time_s = inference_end - inference_start
+        tokens_per_second = token_count / total_inference_time_s if total_inference_time_s > 0 else 0
+        
+        results["first_token_latency_ms"] = round(first_token_latency_ms, 2)
+        results["tokens_per_second"] = round(tokens_per_second, 2)
+        results["output_length_tokens"] = token_count
+        results["output_text"] = output_text
+        results["total_inference_time_s"] = round(total_inference_time_s, 3)
+        
+    except Exception as e:
+        unload_llm()
+        return {"error": f"Inference failed: {e}"}
+    
+    # Peak memory after inference
+    peak_mem = memory_snapshot()
+    
+    # 5. Memory metrics
+    results["memory"] = {
+        "baseline_rss_mb": round(baseline_mem["rss_mb"], 2),
+        "loaded_rss_mb": round(loaded_mem["rss_mb"], 2),
+        "peak_rss_mb": round(peak_rss / (1024 * 1024), 2),
+        "load_increase_mb": round(loaded_mem["rss_mb"] - baseline_mem["rss_mb"], 2),
+        "inference_increase_mb": round((peak_rss / (1024 * 1024)) - loaded_mem["rss_mb"], 2),
+    }
+    
+    # VRAM if available
+    if torch.cuda.is_available() and not CPU_ONLY:
+        results["vram"] = {
+            "baseline_used_mb": round(baseline_mem["vram_used_mb"], 2),
+            "loaded_used_mb": round(loaded_mem["vram_used_mb"], 2),
+            "peak_used_mb": round(peak_mem["vram_used_mb"], 2),
+            "total_mb": round(loaded_mem["vram_total_mb"], 2),
+        }
+    
+    # Metadata
+    results["config"] = {
+        "llm_name": llm_name,
+        "n_ctx": n_ctx,
+        "n_gpu_layers": n_gpu_layers,
+        "max_tokens": max_tokens,
+        "demo_prompt": DEMO_PROMPT,
+    }
+    
+    # Clean up
+    unload_llm()
+    
     return results

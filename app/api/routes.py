@@ -9,7 +9,7 @@ from app.services.cache_service import model_cache
 from app.services.llm_service import download_gguf, load_llm_from_gguf, llm_generate, llm_generate_stream, unload_llm, get_current_name, SERVER_URL
 from app.services.translator_service import translate, detect_supported_language, unload_translator
 from app.services.rag_service import rag_add, rag_remove, rag_retrieve, rag_list, rag_clear
-from app.services.benchmark_service import benchmark_pipeline, benchmark_resource_usage
+from app.services.benchmark_service import benchmark_pipeline, benchmark_resource_usage, benchmark_llm_metrics
 
 
 def _clean_generation(text: str) -> str:
@@ -547,6 +547,80 @@ def ep_benchmark_resource():
             max_tokens=max_tokens
         )
         return jsonify({"ok": True, "results": results})
+    except Exception as e:
+        return jsonify({
+            "error": "benchmark failed",
+            "details": str(e)
+        }), 500
+
+
+@bp.post("/llm_metrics")
+def ep_llm_metrics():
+    """
+    Measure detailed LLM performance metrics.
+    
+    Request body:
+    {
+        "llm_name": "Qwen2-500M-Instruct-GGUF",
+        "n_ctx": 4096,         // optional, default 4096
+        "n_gpu_layers": -1,    // optional, default -1 (all)
+        "max_tokens": 128      // optional, default 128
+    }
+    
+    Returns:
+    {
+        "ok": true,
+        "model_size_gb": 0.5,
+        "load_time_s": 2.3,
+        "first_token_latency_ms": 45.2,
+        "tokens_per_second": 15.6,
+        "output_length_tokens": 128,
+        "output_text": "...",
+        "total_inference_time_s": 8.2,
+        "memory": {
+            "baseline_rss_mb": 450.2,
+            "loaded_rss_mb": 950.8,
+            "peak_rss_mb": 1024.5,
+            "load_increase_mb": 500.6,
+            "inference_increase_mb": 73.7
+        },
+        "vram": {
+            "baseline_used_mb": 0,
+            "loaded_used_mb": 480.5,
+            "peak_used_mb": 520.3,
+            "total_mb": 8192
+        },
+        "config": {
+            "llm_name": "...",
+            "n_ctx": 4096,
+            "n_gpu_layers": -1,
+            "max_tokens": 128,
+            "demo_prompt": "..."
+        }
+    }
+    """
+    body = request.get_json() or {}
+    
+    llm_name = body.get("llm_name")
+    n_ctx = int(body.get("n_ctx", 4096))
+    n_gpu_layers = int(body.get("n_gpu_layers", -1))
+    max_tokens = int(body.get("max_tokens", 128))
+    
+    if not llm_name:
+        return jsonify({"error": "llm_name required"}), 400
+    
+    try:
+        results = benchmark_llm_metrics(
+            llm_name=llm_name,
+            n_ctx=n_ctx,
+            n_gpu_layers=n_gpu_layers,
+            max_tokens=max_tokens
+        )
+        
+        if "error" in results:
+            return jsonify(results), 400
+        
+        return jsonify({"ok": True, **results})
     except Exception as e:
         return jsonify({
             "error": "benchmark failed",

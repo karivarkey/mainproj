@@ -1,0 +1,20 @@
+meta {
+  name: Benchmark LLM
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{dev}}/llm_metrics
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {"llm_name" :"Qwen2-500M-Instruct-GGUF"}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
