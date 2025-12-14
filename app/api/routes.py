@@ -9,7 +9,7 @@ from app.services.cache_service import model_cache
 from app.services.llm_service import download_gguf, load_llm_from_gguf, llm_generate, llm_generate_stream, unload_llm, get_current_name, SERVER_URL
 from app.services.translator_service import translate, detect_supported_language, unload_translator
 from app.services.rag_service import rag_add, rag_remove, rag_retrieve, rag_list, rag_clear
-from app.services.benchmark_service import benchmark_pipeline, benchmark_resource_usage, benchmark_llm_metrics
+from app.services.benchmark_service import benchmark_pipeline, benchmark_resource_usage, benchmark_llm_metrics, benchmark_translator_metrics
 
 
 def _clean_generation(text: str) -> str:
@@ -615,6 +615,97 @@ def ep_llm_metrics():
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
             max_tokens=max_tokens
+        )
+        
+        if "error" in results:
+            return jsonify(results), 400
+        
+        return jsonify({"ok": True, **results})
+    except Exception as e:
+        return jsonify({
+            "error": "benchmark failed",
+            "details": str(e)
+        }), 500
+
+
+@bp.post("/translator_metrics")
+def ep_translator_metrics():
+    """
+    Measure detailed translator performance metrics.
+    
+    Request body:
+    {
+        "src_lang": "hi",      // source language code
+        "tgt_lang": "en"       // optional, target language (default: "en")
+    }
+    
+    Returns:
+    {
+        "ok": true,
+        "input": {
+            "text": "...",
+            "char_length": 250,
+            "token_length_estimate": 45,
+            "src_lang": "hi",
+            "tgt_lang": "en"
+        },
+        "throughput": {
+            "forward": {
+                "chars_per_sec": 180.5,
+                "tokens_per_sec": 32.1,
+                "time_s": 1.385
+            },
+            "roundtrip": {
+                "chars_per_sec": 195.2,
+                "tokens_per_sec": 35.8,
+                "time_s": 1.256
+            }
+        },
+        "quality": {
+            "bleu_score": 45.2,
+            "chrf_score": 62.8,
+            "char_length_similarity_pct": 92.5,
+            "forward_output_chars": 245,
+            "forward_output_tokens": 42,
+            "roundtrip_output_chars": 248,
+            "roundtrip_output_tokens": 44
+        },
+        "memory": {
+            "baseline_rss_mb": 450.2,
+            "after_forward_rss_mb": 650.8,
+            "peak_rss_mb": 680.5,
+            "translation_increase_mb": 200.6,
+            "peak_increase_mb": 230.3
+        },
+        "vram": {
+            "baseline_used_mb": 0,
+            "after_forward_used_mb": 380.5,
+            "peak_used_mb": 420.3,
+            "total_mb": 8192
+        },
+        "end_to_end_time_s": 2.641,
+        "outputs": {
+            "forward_translation": "...",
+            "roundtrip_translation": "..."
+        }
+    }
+    """
+    body = request.get_json() or {}
+    
+    src_lang = body.get("src_lang")
+    tgt_lang = body.get("tgt_lang", "en")
+    
+    if not src_lang:
+        return jsonify({"error": "src_lang required"}), 400
+    
+    # Normalize language codes
+    src_lang = LANG_ALIASES.get(src_lang, src_lang)
+    tgt_lang = LANG_ALIASES.get(tgt_lang, tgt_lang)
+    
+    try:
+        results = benchmark_translator_metrics(
+            src_lang=src_lang,
+            tgt_lang=tgt_lang
         )
         
         if "error" in results:

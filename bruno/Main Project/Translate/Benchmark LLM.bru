@@ -1,0 +1,21 @@
+meta {
+  name: Benchmark LLM
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{dev}}/translator_metrics
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {"src_lang": "hi",
+      "tgt_lang": "en"}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}

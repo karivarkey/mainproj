@@ -568,3 +568,170 @@ def benchmark_llm_metrics(llm_name: str, n_ctx: int = 4096, n_gpu_layers: int = 
     unload_llm()
     
     return results
+
+
+def benchmark_translator_metrics(src_lang: str, tgt_lang: str = "en"):
+    """
+    Comprehensive translator performance metrics.
+    
+    Measures:
+    - Input text length (characters and tokens)
+    - Translation throughput (chars/sec, tokens/sec)
+    - Memory usage during translation
+    - Translation quality (BLEU, CHRF for round-trip)
+    - End-to-end response time
+    
+    Uses a predefined complex multilingual text for consistent benchmarking.
+    """
+    # Complex demo texts for different languages
+    DEMO_TEXTS = {
+        "hi": "भारतीय संविधान विश्व का सबसे लंबा लिखित संविधान है जो 26 जनवरी 1950 को लागू हुआ था। यह दस्तावेज़ भारत के नागरिकों के मौलिक अधिकारों, राज्य के नीति निदेशक तत्वों और सरकार की संरचना को परिभाषित करता है। संविधान सभा ने इसे तीन वर्षों में तैयार किया था।",
+        "ta": "தமிழ் மொழி உலகின் மிகப் பழமையான மொழிகளில் ஒன்றாகும் மற்றும் இது சங்க இலக்கியத்தின் வளமான பாரம்பரியத்தைக் கொண்டுள்ளது। இந்த மொழி தமிழ்நாடு மற்றும் புதுச்சேரியில் உள்ள மக்களின் தாய்மொழியாக விளங்குகிறது மற்றும் இலங்கை மற்றும் சிங்கப்பூரில் குறிப்பிடத்தக்க எண்ணிக்கையில் பேசப்படுகிறது।",
+        "ml": "കേരളം ഇന്ത്യയുടെ തെക്കുപടിഞ്ഞാറൻ തീരത്ത് സ്ഥിതി ചെയ്യുന്ന ഒരു സംസ്ഥാനമാണ്. ഇത് അതിന്റെ പ്രകൃതി സൗന്ദര്യം, ബാക്ക്‌വാട്ടറുകൾ, ആയുർവേദ ചികിത്സ, കത്തകളി നൃത്തം എന്നിവയ്ക്ക് പ്രസിദ്ധമാണ്. കേരളത്തിന് നൂറ് ശതമാനം സാക്ഷരതയും ഉയർന്ന ജീവിത നിലവാരവും ഉണ്ട്।",
+        "te": "తెలుగు భాష ద్రావిడ భాషా కుటుంబంలో అతిపెద్ద భాషగా పరిగణించబడుతుంది మరియు భారతదేశంలో అత్యధికంగా మాట్లాడే భాషల్లో ఒకటి. ఇది ఆంధ్రప్రదేశ్ మరియు తెలంగాణ రాష్ట్రాల అధికారిక భాష. తెలుగు సాహిత్యం గొప్ప చారిత్రక సంప్రదాయాన్ని కలిగి ఉంది.",
+        "bn": "বাংলা ভাষা বিশ্বের সপ্তম সর্বাধিক কথিত ভাষা এবং বাংলাদেশ ও ভারতের পশ্চিমবঙ্গে প্রধান ভাষা হিসেবে ব্যবহৃত হয়। এই ভাষার সমৃদ্ধ সাহিত্যিক ঐতিহ্য রয়েছে যা রবীন্দ্রনাথ ঠাকুর এবং কাজী নজরুল ইসলামের মতো মহান কবিদের অবদান অন্তর্ভুক্ত করে।",
+        "en": "The Renaissance was a period of cultural, artistic, political and economic rebirth following the Middle Ages. Generally described as taking place from the 14th century to the 17th century, it promoted the rediscovery of classical philosophy, literature and art. This transformative era laid the foundation for modern Western civilization.",
+    }
+    
+    # Get demo text or default to English
+    demo_text = DEMO_TEXTS.get(src_lang, DEMO_TEXTS["en"])
+    
+    # Ensure clean state
+    unload_translator()
+    gc.collect()
+    if torch.cuda.is_available() and not CPU_ONLY:
+        torch.cuda.empty_cache()
+    time.sleep(0.5)
+    
+    results = {}
+    bleu = BLEU()
+    chrf = CHRF()
+    
+    # 1. Input metrics
+    input_char_length = len(demo_text)
+    # Rough token estimation (whitespace split + punctuation)
+    input_token_length = len(demo_text.split())
+    
+    results["input"] = {
+        "text": demo_text,
+        "char_length": input_char_length,
+        "token_length_estimate": input_token_length,
+        "src_lang": src_lang,
+        "tgt_lang": tgt_lang,
+    }
+    
+    # Baseline memory
+    baseline_mem = memory_snapshot()
+    
+    # 5. End-to-end timing starts
+    e2e_start = time.perf_counter()
+    
+    # Forward translation (src -> tgt)
+    try:
+        fwd_start = time.perf_counter()
+        translated_text = translate(demo_text, src_lang, tgt_lang, max_tokens=512)
+        fwd_end = time.perf_counter()
+        fwd_time_s = fwd_end - fwd_start
+        
+        fwd_char_length = len(translated_text)
+        fwd_token_length = len(translated_text.split())
+        
+    except Exception as e:
+        unload_translator()
+        return {"error": f"Forward translation failed: {e}"}
+    
+    # Memory after forward translation
+    fwd_mem = memory_snapshot()
+    
+    # Round-trip translation (tgt -> src) for quality measurement
+    try:
+        rt_start = time.perf_counter()
+        roundtrip_text = translate(translated_text, tgt_lang, src_lang, max_tokens=512)
+        rt_end = time.perf_counter()
+        rt_time_s = rt_end - rt_start
+        
+        rt_char_length = len(roundtrip_text)
+        rt_token_length = len(roundtrip_text.split())
+        
+    except Exception as e:
+        unload_translator()
+        return {"error": f"Round-trip translation failed: {e}"}
+    
+    # Peak memory after round-trip
+    peak_mem = memory_snapshot()
+    
+    e2e_end = time.perf_counter()
+    e2e_time_s = e2e_end - e2e_start
+    
+    # 2. Translation throughput
+    fwd_chars_per_sec = input_char_length / fwd_time_s if fwd_time_s > 0 else 0
+    fwd_tokens_per_sec = input_token_length / fwd_time_s if fwd_time_s > 0 else 0
+    
+    rt_chars_per_sec = fwd_char_length / rt_time_s if rt_time_s > 0 else 0
+    rt_tokens_per_sec = fwd_token_length / rt_time_s if rt_time_s > 0 else 0
+    
+    results["throughput"] = {
+        "forward": {
+            "chars_per_sec": round(fwd_chars_per_sec, 2),
+            "tokens_per_sec": round(fwd_tokens_per_sec, 2),
+            "time_s": round(fwd_time_s, 3),
+        },
+        "roundtrip": {
+            "chars_per_sec": round(rt_chars_per_sec, 2),
+            "tokens_per_sec": round(rt_tokens_per_sec, 2),
+            "time_s": round(rt_time_s, 3),
+        },
+    }
+    
+    # 4. Translation quality (effect on downstream accuracy)
+    try:
+        bleu_score = bleu.sentence_score(roundtrip_text, [demo_text]).score
+        chrf_score = chrf.sentence_score(roundtrip_text, [demo_text]).score
+    except Exception as e:
+        bleu_score = 0.0
+        chrf_score = 0.0
+    
+    # Character-level similarity as additional metric
+    char_similarity = (1 - (abs(len(roundtrip_text) - len(demo_text)) / max(len(roundtrip_text), len(demo_text)))) * 100
+    
+    results["quality"] = {
+        "bleu_score": round(bleu_score, 2),
+        "chrf_score": round(chrf_score, 2),
+        "char_length_similarity_pct": round(char_similarity, 2),
+        "forward_output_chars": fwd_char_length,
+        "forward_output_tokens": fwd_token_length,
+        "roundtrip_output_chars": rt_char_length,
+        "roundtrip_output_tokens": rt_token_length,
+    }
+    
+    # 3. Memory usage
+    results["memory"] = {
+        "baseline_rss_mb": round(baseline_mem["rss_mb"], 2),
+        "after_forward_rss_mb": round(fwd_mem["rss_mb"], 2),
+        "peak_rss_mb": round(peak_mem["rss_mb"], 2),
+        "translation_increase_mb": round(fwd_mem["rss_mb"] - baseline_mem["rss_mb"], 2),
+        "peak_increase_mb": round(peak_mem["rss_mb"] - baseline_mem["rss_mb"], 2),
+    }
+    
+    # VRAM if available
+    if torch.cuda.is_available() and not CPU_ONLY:
+        results["vram"] = {
+            "baseline_used_mb": round(baseline_mem["vram_used_mb"], 2),
+            "after_forward_used_mb": round(fwd_mem["vram_used_mb"], 2),
+            "peak_used_mb": round(peak_mem["vram_used_mb"], 2),
+            "total_mb": round(fwd_mem["vram_total_mb"], 2),
+        }
+    
+    # 5. End-to-end response time
+    results["end_to_end_time_s"] = round(e2e_time_s, 3)
+    
+    # Output texts
+    results["outputs"] = {
+        "forward_translation": translated_text,
+        "roundtrip_translation": roundtrip_text,
+    }
+    
+    # Clean up
+    unload_translator()
+    
+    return results
