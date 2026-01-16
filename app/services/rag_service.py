@@ -3,6 +3,7 @@ import json
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from app.services.pdf_service import ingest_pdf
 from app.config import (
     RAG_INDEX_FILE, 
     RAG_META_FILE, 
@@ -113,3 +114,48 @@ def rag_clear():
     rag_index = faiss.IndexFlatIP(DIM)
     rag_meta = {}
     save_rag_state()
+
+def add_pdf_to_rag(pdf_path: str):
+    """
+    Ingest a PDF, chunk it, embed chunks, and add them to the RAG index.
+
+    Returns:
+        dict with pdf_id and number of chunks added
+    """
+    chunks = ingest_pdf(pdf_path)
+    if not chunks:
+        return {"pdf_id": None, "chunks_added": 0}
+
+    model = get_embed_model()
+
+    # Embed in batch (critical for performance)
+    embeddings = model.encode(
+        chunks,
+        batch_size=32,
+        show_progress_bar=False
+    )
+    embeddings = normalize(embeddings)
+
+    # Track starting index position
+    start_idx = len(rag_meta)
+
+    # Add to FAISS
+    rag_index.add(embeddings)
+
+    pdf_id = str(uuid.uuid4())
+
+    # Store metadata indexed by FAISS position (NOT doc_id)
+    for i, text in enumerate(chunks):
+        rag_meta[start_idx + i] = {
+            "pdf_id": pdf_id,
+            "chunk_id": i,
+            "text": text,
+            "source": pdf_path,
+        }
+
+    save_rag_state()
+
+    return {
+        "pdf_id": pdf_id,
+        "chunks_added": len(chunks),
+    }

@@ -3,12 +3,14 @@ import json
 import re
 import time
 import os
+import tempfile
+from werkzeug.utils import secure_filename
 import psutil
 from app.config import LANG_MAP, LANG_ALIASES, NLLB_LANG_MAP
 from app.services.cache_service import model_cache
 from app.services.llm_service import download_gguf, load_llm_from_gguf, llm_generate, llm_generate_stream, unload_llm, get_current_name, SERVER_URL
 from app.services.translator_service import translate, detect_supported_language, unload_translator
-from app.services.rag_service import rag_add, rag_remove, rag_retrieve, rag_list, rag_clear
+from app.services.rag_service import rag_add, rag_remove, rag_retrieve, rag_list, rag_clear, add_pdf_to_rag
 from app.services.benchmark_service import benchmark_pipeline, benchmark_resource_usage, benchmark_llm_metrics, benchmark_translator_metrics, benchmark_rag_metrics
 
 
@@ -481,6 +483,38 @@ def ep_rag_clear():
     """Clear all RAG documents."""
     rag_clear()
     return jsonify({"ok": True, "message": "All RAG documents cleared"})
+
+
+@bp.post("/rag/add_pdf")
+def ep_rag_add_pdf():
+    """Accept an uploaded PDF file (multipart form, field 'file'), ingest it and add chunks to RAG."""
+    if 'file' not in request.files:
+        return jsonify({"error": "file required (multipart form, field name 'file')"}), 400
+
+    f = request.files['file']
+    if not f or f.filename == '':
+        return jsonify({"error": "empty filename or no file provided"}), 400
+
+    filename = secure_filename(f.filename)
+    tmp_dir = tempfile.mkdtemp(prefix="rag_upload_")
+    tmp_path = os.path.join(tmp_dir, filename)
+    try:
+        f.save(tmp_path)
+        result = add_pdf_to_rag(tmp_path)
+        return jsonify({"ok": True, "result": result})
+    except Exception as e:
+        return jsonify({"error": "failed to ingest PDF", "details": str(e)}), 500
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        try:
+            if os.path.exists(tmp_dir):
+                os.rmdir(tmp_dir)
+        except Exception:
+            pass
 
 @bp.post("/rag/search")
 def ep_rag_search():
