@@ -91,6 +91,12 @@ RAG_EMBEDDING_DIM = 768
 RAG_SIMILARITY_THRESHOLD = 0.35
 RAG_TOP_K = 3
 
+# Query cache configuration (caches similar query embeddings → RAG results)
+QUERY_CACHE_FILE = RAG_DIR / "query_cache.json"
+QUERY_CACHE_SIMILARITY_THRESHOLD = 0.80  # min cosine similarity to reuse cached RAG docs
+QUERY_CACHE_MAX_ENTRIES = 1000  # max number of queries to cache
+QUERY_CACHE_ENABLED = os.environ.get("QUERY_CACHE_ENABLED", "true").lower() in ("1", "true", "yes")
+
 # LLM configuration defaults
 LLM_DEFAULT_N_CTX = 4096
 LLM_DEFAULT_N_GPU_LAYERS = 0 if CPU_ONLY else -1  # 0 = CPU only, -1 = max GPU offload
@@ -105,4 +111,4 @@ def ensure_dirs():
     BASE.mkdir(exist_ok=True)
     LLM_DIR.mkdir(parents=True, exist_ok=True)
     TRANS_DIR.mkdir(parents=True, exist_ok=True)
-    RAG_DIR.mkdir(exist_ok=True)
+    RAG_DIR.mkdir(exist_ok=True)  # also creates query cache directory

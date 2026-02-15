@@ -1,5 +1,5 @@
 from pathlib import Path
-from llama_cpp import Llama
+# llama_cpp is optional; import lazily in load_llm to allow the server to start without it
 from app.config import (
     LLM_DIR,
     LLM_DEFAULT_N_CTX,
@@ -13,18 +13,40 @@ from app.config import (
 )
 from app.services.cache_service import model_cache, save_cache
 
-current_llm: Llama | None = None
+current_llm = None
 current_name: str | None = None
 current_path: Path | None = None
 
+def get_current_name():
+    return current_name
 
 def local_gguf_path(model_name: str) -> Path:
-    safe = model_name.replace("/", "__")
+    safe = model_name.replace("/", "__").strip()
+
+    # Prevent double-extension bug: foo.gguf.gguf
+    if safe.endswith(".gguf"):
+        return LLM_DIR / safe
+
     return LLM_DIR / f"{safe}.gguf"
 
 
+def list_local_llms() -> list[str]:
+    """List GGUF files actually present in models/llms folder."""
+    if not LLM_DIR.exists():
+        return []
+    return sorted([p.name for p in LLM_DIR.glob("*.gguf") if p.is_file()])
+
+
+def list_all_llms() -> list[str]:
+    """Merge cache list + disk list (so manual copied models also show)."""
+    from_disk = set(list_local_llms())
+    from_cache = set(model_cache.get("llms", []))
+    return sorted(from_disk.union(from_cache))
+
+
 def download_gguf(url: str, model_name: str) -> Path:
-    import requests, os
+    import requests
+    import os
 
     LLM_DIR.mkdir(parents=True, exist_ok=True)
     dest = local_gguf_path(model_name)
@@ -47,7 +69,8 @@ def download_gguf(url: str, model_name: str) -> Path:
                     downloaded += len(chunk)
                     if total:
                         pct = downloaded * 100 // total
-                        print(f"{pct}% {downloaded/1e6:.1f}/{total/1e6:.1f} MB", end="\r")
+                        print(
+                            f"{pct}% {downloaded/1e6:.1f}/{total/1e6:.1f} MB", end="\r")
 
     model_cache["llms"].append(model_name)
     save_cache(model_cache)
@@ -56,12 +79,12 @@ def download_gguf(url: str, model_name: str) -> Path:
 
 def load_llm(model_name: str, n_ctx: int = None, n_gpu_layers: int = None):
     global current_llm, current_name, current_path
-    
+
     if n_ctx is None:
         n_ctx = LLM_DEFAULT_N_CTX
     if n_gpu_layers is None:
         n_gpu_layers = LLM_DEFAULT_N_GPU_LAYERS
-    
+
     # Force CPU-only if CPU_ONLY flag is set
     if CPU_ONLY and n_gpu_layers != 0:
         print(f"[LLM] CPU_ONLY mode enabled, forcing n_gpu_layers=0")
@@ -72,6 +95,9 @@ def load_llm(model_name: str, n_ctx: int = None, n_gpu_layers: int = None):
         raise FileNotFoundError(gguf_path)
 
     print(f"Loading GGUF: {gguf_path}")
+
+    # Import Llama lazily so server can start without `llama_cpp` installed
+    from llama_cpp import Llama
 
     # Kill previous model (free GPU VRAM)
     current_llm = None
@@ -89,16 +115,12 @@ def load_llm(model_name: str, n_ctx: int = None, n_gpu_layers: int = None):
     print("Model loaded.")
     return current_llm
 
+
 # Alias for compatibility with routes.py
 load_llm_from_gguf = load_llm
 
 # Hardcoded server URL constant for compatibility
 SERVER_URL = "http://localhost:8080"
-
-
-def get_current_name():
-    """Get the currently loaded LLM name."""
-    return current_name
 
 
 def unload_llm():
@@ -235,7 +257,7 @@ def llm_generate_stream(
 
             if text:
                 yield text
-        
+
         # Clear context after streaming generation completes
         reset_llm_context()
     except RuntimeError as e:

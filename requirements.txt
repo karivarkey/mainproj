@@ -1,7 +1,6 @@
 argcomplete==3.6.2
 attrs==25.4.0
 autocommand==2.2.2
-Brlapi==0.8.7
 btrfsutil==6.17.1
 cffi==2.0.0
 charset-normalizer==3.4.4
