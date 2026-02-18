@@ -246,3 +246,11 @@ def unload_translator(model_id: str = NLLB_MODEL):
         print(f"[NLLB] Unloaded translator: {model_id}")
         return True
     return False
+
+
+def preload_translator(model_id: str = NLLB_MODEL):
+    """Preload NLLB tokenizer and model without translating."""
+    get_translator(model_id)
+    return {
+        "model": model_id,
+    }

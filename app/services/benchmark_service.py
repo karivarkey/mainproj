@@ -7,8 +7,9 @@ import os
 import torch
 from pathlib import Path
 from sacrebleu.metrics import BLEU, CHRF
-from app.config import CPU_ONLY, LLM_DIR, RAG_INDEX_FILE, RAG_META_FILE
+from app.config import CPU_ONLY, LLM_DIR, RAG_INDEX_FILE, RAG_META_FILE, USE_ONNX_TRANSLATOR
 from app.services.translator_service import translate, unload_translator
+from app.services.onnx_translator_service import translate_onnx, unload_onnx_translator
 from app.services.llm_service import llm_generate, llm_generate_stream, load_llm, unload_llm, local_gguf_path
 from app.services.rag_service import rag_add, rag_clear, rag_list, rag_retrieve
 
@@ -570,7 +571,7 @@ def benchmark_llm_metrics(llm_name: str, n_ctx: int = 4096, n_gpu_layers: int = 
     return results
 
 
-def benchmark_translator_metrics(src_lang: str, tgt_lang: str = "en"):
+def benchmark_translator_metrics(src_lang: str, tgt_lang: str = "en", use_onnx: bool = None):
     """
     Comprehensive translator performance metrics.
     
@@ -582,26 +583,64 @@ def benchmark_translator_metrics(src_lang: str, tgt_lang: str = "en"):
     - End-to-end response time
     
     Uses a predefined complex multilingual text for consistent benchmarking.
+    
+    Args:
+        src_lang: Source language code
+        tgt_lang: Target language code
+        use_onnx: Use ONNX backend if True, NLLB if False, auto-detect if None
     """
+    # Determine which backend to use
+    if use_onnx is None:
+        use_onnx = USE_ONNX_TRANSLATOR
+    
+    translate_fn = translate_onnx if use_onnx else translate
+    unload_fn = unload_onnx_translator if use_onnx else unload_translator
+    backend = "onnx" if use_onnx else "nllb"
     # Complex demo texts for different languages
     DEMO_TEXTS = {
-        "hi": "भारतीय संविधान विश्व का सबसे लंबा लिखित संविधान है जो 26 जनवरी 1950 को लागू हुआ था। यह दस्तावेज़ भारत के नागरिकों के मौलिक अधिकारों, राज्य के नीति निदेशक तत्वों और सरकार की संरचना को परिभाषित करता है। संविधान सभा ने इसे तीन वर्षों में तैयार किया था।",
-        "ta": "தமிழ் மொழி உலகின் மிகப் பழமையான மொழிகளில் ஒன்றாகும் மற்றும் இது சங்க இலக்கியத்தின் வளமான பாரம்பரியத்தைக் கொண்டுள்ளது। இந்த மொழி தமிழ்நாடு மற்றும் புதுச்சேரியில் உள்ள மக்களின் தாய்மொழியாக விளங்குகிறது மற்றும் இலங்கை மற்றும் சிங்கப்பூரில் குறிப்பிடத்தக்க எண்ணிக்கையில் பேசப்படுகிறது।",
-        "ml": "കേരളം ഇന്ത്യയുടെ തെക്കുപടിഞ്ഞാറൻ തീരത്ത് സ്ഥിതി ചെയ്യുന്ന ഒരു സംസ്ഥാനമാണ്. ഇത് അതിന്റെ പ്രകൃതി സൗന്ദര്യം, ബാക്ക്‌വാട്ടറുകൾ, ആയുർവേദ ചികിത്സ, കത്തകളി നൃത്തം എന്നിവയ്ക്ക് പ്രസിദ്ധമാണ്. കേരളത്തിന് നൂറ് ശതമാനം സാക്ഷരതയും ഉയർന്ന ജീവിത നിലവാരവും ഉണ്ട്।",
+        # Indian Languages
+        "hi": "प्रौद्योगिकी दुनिया भर के लोगों को जोड़ती है। नई भाषाएं सीखना कई अवसर खोलता है।",
+        "bn": "প্রযুক্তি বিশ্বজুড়ে মানুষকে সংযুক্ত করে। নতুন ভাষা শেখা অনেক সুযোগের দ্বার খুলে দেয়।",
+        "mr": "तंत्रज्ञान जगभरातील लोकांना जोडते। नवीन भाषा शिकल्याने अनेक संधी उपलब्ध होतात।",
+        "gu": "ટેકનોલોજી વિશ્વભરના લોકોને જોડે છે. નવી ભાષાઓ શીખવાથી ઘણી તકો ખુલે છે.",
+        "pa": "ਤਕਨਾਲੋਜੀ ਦੁਨੀਆ ਭਰ ਦੇ ਲੋਕਾਂ ਨੂੰ ਜੋੜਦੀ ਹੈ। ਨਵੀਆਂ ਭਾਸ਼ਾਵਾਂ ਸਿੱਖਣਾ ਕਈ ਮੌਕੇ ਖੋਲ੍ਹਦਾ ਹੈ।",
+        "ur": "ٹیکنالوجی دنیا بھر کے لوگوں کو جوڑتی ہے۔ نئی زبانیں سیکھنا کئی مواقع فراہم کرتا ہے۔",
+        "as": "প্রযুক্তিয়ে বিশ্বজুৰি মানুহক সংযোগ কৰে। নতুন ভাষা শিকিলে বহু সুযোগ উন্মুক্ত হয়।",
+        "or": "ଟେକ୍ନୋଲୋଜି ବିଶ୍ୱବ୍ୟାପୀ ଲୋକଙ୍କୁ ସଂଯୋଗ କରେ | ନୂତନ ଭାଷା ଶିଖିବା ଅନେକ ସୁଯୋଗ ଖୋଲିଥାଏ |",
+        "ta": "தொழில்நுட்பம் உலகம் முழுவதும் உள்ள மக்களை இணைக்கிறது. புதிய மொழிகளைக் கற்றுக்கொள்வது பல வாய்ப்புகளைத் திறக்கிறது.",
         "te": "తెలుగు భాష ద్రావిడ భాషా కుటుంబంలో అతిపెద్ద భాషగా పరిగణించబడుతుంది మరియు భారతదేశంలో అత్యధికంగా మాట్లాడే భాషల్లో ఒకటి. ఇది ఆంధ్రప్రదేశ్ మరియు తెలంగాణ రాష్ట్రాల అధికారిక భాష. తెలుగు సాహిత్యం గొప్ప చారిత్రక సంప్రదాయాన్ని కలిగి ఉంది.",
-        "bn": "বাংলা ভাষা বিশ্বের সপ্তম সর্বাধিক কথিত ভাষা এবং বাংলাদেশ ও ভারতের পশ্চিমবঙ্গে প্রধান ভাষা হিসেবে ব্যবহৃত হয়। এই ভাষার সমৃদ্ধ সাহিত্যিক ঐতিহ্য রয়েছে যা রবীন্দ্রনাথ ঠাকুর এবং কাজী নজরুল ইসলামের মতো মহান কবিদের অবদান অন্তর্ভুক্ত করে।",
-        "en": "The Renaissance was a period of cultural, artistic, political and economic rebirth following the Middle Ages. Generally described as taking place from the 14th century to the 17th century, it promoted the rediscovery of classical philosophy, literature and art. This transformative era laid the foundation for modern Western civilization.",
+        "kn": "ತಂತ್ರಜ್ಞಾನವು ಪ್ರಪಂಚದಾದ್ಯಂತದ ಜನರನ್ನು ಸಂಪರ್ಕಿಸುತ್ತದೆ. ಹೊಸ ಭಾಷೆಗಳನ್ನು ಕಲಿಯುವುದು ಅನೇಕ ಅವಕಾಶಗಳನ್ನು ತೆರೆಯುತ್ತದೆ.",
+        "ml": "സാങ്കേതികവിദ്യ ലോകമെമ്പാടുമുള്ള ആളുകളെ ബന്ധിപ്പിക്കുന്നു. പുതിയ ഭാഷകൾ പഠിക്കുന്നത് നിരവധി അവസരങ്ങൾ തുറക്കുന്നു.",
+        # International Languages
+        "en": "Technology connects people across the world. Learning new languages opens many opportunities.",
+        "fr": "La technologie connecte les gens à travers le monde. Apprendre de nouvelles langues ouvre de nombreuses opportunités.",
+        "de": "Technologie verbindet Menschen auf der ganzen Welt. Das Lernen neuer Sprachen eröffnet viele Möglichkeiten.",
+        "es": "La tecnología conecta a las personas en todo el mundo. Aprender nuevos idiomas abre muchas oportunidades.",
+        "pt": "A tecnologia conecta pessoas em todo o mundo. Aprender novos idiomas abre muitas oportunidades.",
+        "ru": "Технологии объединяют людей по всему миру. Изучение новых языков открывает много возможностей.",
+        "ja": "テクノロジーは世界中の人々をつなぎます。新しい言語を学ぶことは多くの機会を開きます。",
+        "zh": "技术将世界各地的人们联系在一起。学习新语言会带来许多机会。",
     }
     
     # Get demo text or default to English
     demo_text = DEMO_TEXTS.get(src_lang, DEMO_TEXTS["en"])
     
-    # Ensure clean state
-    unload_translator()
+    # Warm-up: Pre-load models before benchmarking
+    # This ensures we measure "warm" inference latency, not cold start
+    print(f"[BENCHMARK] Warming up {backend} translator...")
+    try:
+        # Run a quick translation to load all models into memory
+        _ = translate_fn("Technology connects people.", src_lang, tgt_lang, max_tokens=50)
+        print(f"[BENCHMARK] {backend} models loaded and cached")
+    except Exception as e:
+        print(f"[BENCHMARK] Warm-up failed: {e}")
+        return {"error": f"Model warm-up failed: {e}"}
+    
+    # Clean memory counters (not models)
     gc.collect()
     if torch.cuda.is_available() and not CPU_ONLY:
         torch.cuda.empty_cache()
-    time.sleep(0.5)
+    time.sleep(0.3)
     
     results = {}
     bleu = BLEU()
@@ -618,6 +657,7 @@ def benchmark_translator_metrics(src_lang: str, tgt_lang: str = "en"):
         "token_length_estimate": input_token_length,
         "src_lang": src_lang,
         "tgt_lang": tgt_lang,
+        "backend": backend,
     }
     
     # Baseline memory
@@ -629,7 +669,7 @@ def benchmark_translator_metrics(src_lang: str, tgt_lang: str = "en"):
     # Forward translation (src -> tgt)
     try:
         fwd_start = time.perf_counter()
-        translated_text = translate(demo_text, src_lang, tgt_lang, max_tokens=512)
+        translated_text = translate_fn(demo_text, src_lang, tgt_lang, max_tokens=512)
         fwd_end = time.perf_counter()
         fwd_time_s = fwd_end - fwd_start
         
@@ -637,7 +677,7 @@ def benchmark_translator_metrics(src_lang: str, tgt_lang: str = "en"):
         fwd_token_length = len(translated_text.split())
         
     except Exception as e:
-        unload_translator()
+        unload_fn()
         return {"error": f"Forward translation failed: {e}"}
     
     # Memory after forward translation
@@ -646,7 +686,7 @@ def benchmark_translator_metrics(src_lang: str, tgt_lang: str = "en"):
     # Round-trip translation (tgt -> src) for quality measurement
     try:
         rt_start = time.perf_counter()
-        roundtrip_text = translate(translated_text, tgt_lang, src_lang, max_tokens=512)
+        roundtrip_text = translate_fn(translated_text, tgt_lang, src_lang, max_tokens=512)
         rt_end = time.perf_counter()
         rt_time_s = rt_end - rt_start
         
@@ -654,7 +694,7 @@ def benchmark_translator_metrics(src_lang: str, tgt_lang: str = "en"):
         rt_token_length = len(roundtrip_text.split())
         
     except Exception as e:
-        unload_translator()
+        unload_fn()
         return {"error": f"Round-trip translation failed: {e}"}
     
     # Peak memory after round-trip
@@ -732,7 +772,7 @@ def benchmark_translator_metrics(src_lang: str, tgt_lang: str = "en"):
     }
     
     # Clean up
-    unload_translator()
+    unload_fn()
     
     return results
 

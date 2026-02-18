@@ -57,6 +57,17 @@ import numpy as np
 #     cache_file=QUERY_CACHE_FILE,
 #     similarity_threshold=0.70   # Lowered for demo reliability
 # )
+import os
+import tempfile
+from werkzeug.utils import secure_filename
+import psutil
+from app.config import LANG_MAP, LANG_ALIASES, NLLB_LANG_MAP, USE_ONNX_TRANSLATOR, ONNX_LANG_MAP
+from app.services.cache_service import model_cache
+from app.services.llm_service import download_gguf, load_llm_from_gguf, llm_generate, llm_generate_stream, unload_llm, get_current_name, SERVER_URL
+from app.services.translator_service import translate, detect_supported_language, unload_translator, preload_translator
+from app.services.rag_service import rag_add, rag_remove, rag_retrieve, rag_list, rag_clear, add_pdf_to_rag
+from app.services.benchmark_service import benchmark_pipeline, benchmark_resource_usage, benchmark_llm_metrics, benchmark_translator_metrics, benchmark_rag_metrics
+from app.services.onnx_translator_service import translate_onnx, get_onnx_status, unload_onnx_translator, preload_onnx_translator
 
 
 def _clean_generation(text: str) -> str:
@@ -170,12 +181,76 @@ def ep_translator_metrics():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@bp.get("/translator_status")
+def ep_translator_status():
+    """Get status of available translators (NLLB and ONNX)."""
+    onnx_status = get_onnx_status()
+    return jsonify({
+        "active_translator": "onnx" if USE_ONNX_TRANSLATOR and onnx_status["available"] else "nllb",
+        "onnx": onnx_status,
+        "nllb": {
+            "available": True,
+            "model": "facebook/nllb-200-distilled-600M"
+        }
+    })
+
+@bp.post("/toggle_translator")
+def ep_toggle_translator():
+    """Toggle between ONNX and NLLB translator."""
+    body = request.get_json() or {}
+    use_onnx = body.get("use_onnx", not USE_ONNX_TRANSLATOR)
+    
+    onnx_status = get_onnx_status()
+    if use_onnx and not onnx_status["available"]:
+        return jsonify({
+            "error": "ONNX models not available",
+            "details": onnx_status
+        }), 503
+    
+    if use_onnx:
+        print("[API] Switching to ONNX translator")
+        unload_translator()  # Clean up NLLB if loaded
+    else:
+        print("[API] Switching to NLLB translator")
+        unload_onnx_translator()  # Clean up ONNX if loaded
+    
+    return jsonify({
+        "ok": True,
+        "active_translator": "onnx" if use_onnx else "nllb"
+    })
+
+
+@bp.post("/translator_preload")
+def ep_translator_preload():
+    """Preload translator models without running a translation."""
+    body = request.get_json() or {}
+    use_onnx = body.get("use_onnx", USE_ONNX_TRANSLATOR)
+
+    if use_onnx:
+        onnx_status = get_onnx_status()
+        if not onnx_status["available"]:
+            return jsonify({
+                "error": "ONNX models not available",
+                "details": onnx_status
+            }), 503
+        details = preload_onnx_translator()
+    else:
+        details = preload_translator()
+
+    return jsonify({
+        "ok": True,
+        "active_translator": "onnx" if use_onnx else "nllb",
+        "details": details,
+    })
+
 @bp.post("/translate")
 def ep_translate():
     body = request.get_json() or {}
     text = body.get("text")
-    src_lang = body.get("src_lang", "auto")
-    tgt_lang = body.get("tgt_lang", "en")
+    target = (body.get("target") or "en").lower()
+    stream = bool(body.get("stream", True))
+    max_tokens = int(body.get("max_new_tokens", 256))
+    use_onnx = body.get("use_onnx", USE_ONNX_TRANSLATOR)
 
     if not text:
         return jsonify({"error": "text required"}), 400
@@ -189,12 +264,80 @@ def ep_translate():
 
     try:
         translated = translate(text, src_lang, tgt_lang)
+    # Auto-detect source language (must be in LANG_CONF)
+    src_lang_key = detect_supported_language(text)
+    if not src_lang_key:
+        return jsonify({"error": "could not auto-detect a supported language"}), 400
+
+    # Determine which language map and translation function to use
+    if use_onnx:
+        target_map = ONNX_LANG_MAP
+        translate_fn = translate_onnx
+        backend = "onnx"
+        # For ONNX, use short codes (e.g., "hi" instead of "hin_Deva")
+        src_code = src_lang_key
+        
+        # Check if ONNX supports the detected language
+        if src_lang_key not in ONNX_LANG_MAP:
+            supported_langs = ", ".join(sorted(ONNX_LANG_MAP.keys()))
+            return jsonify({
+                "error": f"Language '{src_lang_key}' not supported by ONNX model",
+                "details": f"ONNX supports: {supported_langs}",
+                "suggestion": "Switch to NLLB translator or use a supported language"
+            }), 400
+    else:
+        target_map = NLLB_LANG_MAP
+        translate_fn = translate
+        backend = "nllb"
+        # For NLLB, use long codes from LANG_MAP (e.g., "hin_Deva")
+        src_code, _ = LANG_MAP[src_lang_key]
+
+    # Normalize target and validate it against known mappings or raw NLLB codes
+    target_key = LANG_ALIASES.get(target, target)
+    target_code = target_map.get(target_key, target_key)
+    if target_key not in LANG_MAP and target_key not in target_map and "_" not in target_key:
+        return jsonify({"error": f"unsupported target language: {target}"}), 400
+
+    # Helper to iterate sentences from paragraphs
+    sentence_end_re = re.compile(r"(.+?[.!?](?:\"|'|”)?)(\s+|$)", re.S)
+
+    def iter_sentences(blob: str):
+        buffer = blob
+        while True:
+            match = sentence_end_re.search(buffer)
+            if not match:
+                break
+            sent = match.group(1).strip()
+            buffer = buffer[match.end():]
+            if sent:
+                yield sent
+        if buffer.strip():
+            yield buffer.strip()
+
+    if not stream:
+        translated_sentences = []
+        for sent in iter_sentences(text):
+            try:
+                translated = translate_fn(sent, src_code, target_code, max_tokens)
+            except Exception as e:
+                return jsonify({
+                    "error": f"{backend} translation failed",
+                    "details": str(e)
+                }), 503
+            translated_sentences.append({
+                "source": sent,
+                "translated": translated,
+            })
+
+        combined = " ".join(item["translated"] for item in translated_sentences)
         return jsonify({
             "ok": True,
             "input": text,
-            "src_lang": src_lang,
-            "tgt_lang": tgt_lang,
-            "translated": translated
+            "detected_lang": src_lang_key,
+            "target_lang": target_key,
+            "translated_text": combined,
+            "sentences": translated_sentences,
+            "backend": backend,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -929,3 +1072,259 @@ def ep_benchmark_resource():
         return jsonify({"ok": True, "results": results})
     except Exception as e:
         return jsonify({"error": "benchmark failed", "details": str(e)}), 500
+        return jsonify({
+            "error": "benchmark failed",
+            "details": str(e)
+        }), 500
+
+
+@bp.post("/llm_metrics")
+def ep_llm_metrics():
+    """
+    Measure detailed LLM performance metrics.
+    
+    Request body:
+    {
+        "llm_name": "Qwen2-500M-Instruct-GGUF",
+        "n_ctx": 4096,         // optional, default 4096
+        "n_gpu_layers": -1,    // optional, default -1 (all)
+        "max_tokens": 128      // optional, default 128
+    }
+    
+    Returns:
+    {
+        "ok": true,
+        "model_size_gb": 0.5,
+        "load_time_s": 2.3,
+        "first_token_latency_ms": 45.2,
+        "tokens_per_second": 15.6,
+        "output_length_tokens": 128,
+        "output_text": "...",
+        "total_inference_time_s": 8.2,
+        "memory": {
+            "baseline_rss_mb": 450.2,
+            "loaded_rss_mb": 950.8,
+            "peak_rss_mb": 1024.5,
+            "load_increase_mb": 500.6,
+            "inference_increase_mb": 73.7
+        },
+        "vram": {
+            "baseline_used_mb": 0,
+            "loaded_used_mb": 480.5,
+            "peak_used_mb": 520.3,
+            "total_mb": 8192
+        },
+        "config": {
+            "llm_name": "...",
+            "n_ctx": 4096,
+            "n_gpu_layers": -1,
+            "max_tokens": 128,
+            "demo_prompt": "..."
+        }
+    }
+    """
+    body = request.get_json() or {}
+    
+    llm_name = body.get("llm_name")
+    n_ctx = int(body.get("n_ctx", 4096))
+    n_gpu_layers = int(body.get("n_gpu_layers", -1))
+    max_tokens = int(body.get("max_tokens", 128))
+    
+    if not llm_name:
+        return jsonify({"error": "llm_name required"}), 400
+    
+    try:
+        results = benchmark_llm_metrics(
+            llm_name=llm_name,
+            n_ctx=n_ctx,
+            n_gpu_layers=n_gpu_layers,
+            max_tokens=max_tokens
+        )
+        
+        if "error" in results:
+            return jsonify(results), 400
+        
+        return jsonify({"ok": True, **results})
+    except Exception as e:
+        return jsonify({
+            "error": "benchmark failed",
+            "details": str(e)
+        }), 500
+
+
+@bp.post("/translator_metrics")
+def ep_translator_metrics():
+    """
+    Measure detailed translator performance metrics.
+    
+    Request body:
+    {
+        "src_lang": "hi",      // source language code
+        "tgt_lang": "en"       // optional, target language (default: "en")
+    }
+    
+    Returns:
+    {
+        "ok": true,
+        "input": {
+            "text": "...",
+            "char_length": 250,
+            "token_length_estimate": 45,
+            "src_lang": "hi",
+            "tgt_lang": "en"
+        },
+        "throughput": {
+            "forward": {
+                "chars_per_sec": 180.5,
+                "tokens_per_sec": 32.1,
+                "time_s": 1.385
+            },
+            "roundtrip": {
+                "chars_per_sec": 195.2,
+                "tokens_per_sec": 35.8,
+                "time_s": 1.256
+            }
+        },
+        "quality": {
+            "bleu_score": 45.2,
+            "chrf_score": 62.8,
+            "char_length_similarity_pct": 92.5,
+            "forward_output_chars": 245,
+            "forward_output_tokens": 42,
+            "roundtrip_output_chars": 248,
+            "roundtrip_output_tokens": 44
+        },
+        "memory": {
+            "baseline_rss_mb": 450.2,
+            "after_forward_rss_mb": 650.8,
+            "peak_rss_mb": 680.5,
+            "translation_increase_mb": 200.6,
+            "peak_increase_mb": 230.3
+        },
+        "vram": {
+            "baseline_used_mb": 0,
+            "after_forward_used_mb": 380.5,
+            "peak_used_mb": 420.3,
+            "total_mb": 8192
+        },
+        "end_to_end_time_s": 2.641,
+        "outputs": {
+            "forward_translation": "...",
+            "roundtrip_translation": "..."
+        }
+    }
+    """
+    body = request.get_json() or {}
+    
+    src_lang = body.get("src_lang")
+    tgt_lang = body.get("tgt_lang", "en")
+    use_onnx = body.get("use_onnx", USE_ONNX_TRANSLATOR)
+    
+    if not src_lang:
+        return jsonify({"error": "src_lang required"}), 400
+    
+    # Normalize language codes
+    src_lang = LANG_ALIASES.get(src_lang, src_lang)
+    tgt_lang = LANG_ALIASES.get(tgt_lang, tgt_lang)
+    
+    try:
+        results = benchmark_translator_metrics(
+            src_lang=src_lang,
+            tgt_lang=tgt_lang,
+            use_onnx=use_onnx
+        )
+        
+        if "error" in results:
+            return jsonify(results), 400
+        
+        return jsonify({"ok": True, **results})
+    except Exception as e:
+        return jsonify({
+            "error": "benchmark failed",
+            "details": str(e)
+        }), 500
+
+
+@bp.post("/rag_metrics")
+def ep_rag_metrics():
+    """
+    Measure detailed RAG performance metrics.
+    
+    Request body:
+    {
+        "llm_name": "Qwen2-500M-Instruct-GGUF",  // optional, for RAG impact analysis
+        "n_ctx": 4096,                           // optional, default 4096
+        "n_gpu_layers": -1                       // optional, default -1 (all)
+    }
+    
+    Returns:
+    {
+        "ok": true,
+        "documents_indexed": 10,
+        "indexing_time_s": 0.234,
+        "index_size": {
+            "index_file_mb": 0.0012,
+            "metadata_file_mb": 0.0008,
+            "total_mb": 0.0020
+        },
+        "retrieval_performance": {
+            "avg_query_time_ms": 2.5,
+            "min_query_time_ms": 1.8,
+            "max_query_time_ms": 3.2,
+            "topk_avg_times_ms": {
+                "1": 1.9,
+                "3": 2.5,
+                "5": 3.1
+            }
+        },
+        "memory": {
+            "baseline_rss_mb": 450.2,
+            "after_indexing_rss_mb": 452.8,
+            "indexing_increase_mb": 2.6
+        },
+        "relevance": {
+            "avg_recall_at_3": 0.85,
+            "queries_evaluated": 4,
+            "perfect_recalls": 2
+        },
+        "rag_impact": {
+            "query": "What is quantum computing and how does it work?",
+            "answer_without_rag": "...",
+            "answer_with_rag": "...",
+            "answer_length_diff": 45,
+            "inference_time_without_rag_s": 1.2,
+            "inference_time_with_rag_s": 1.5,
+            "rag_overhead_s": 0.3,
+            "contexts_used": 3
+        },
+        "restoration": {
+            "original_doc_count": 5,
+            "restored_doc_count": 5
+        }
+    }
+    
+    Note: This endpoint temporarily clears RAG data, runs benchmarks with demo data,
+    then restores the original RAG documents.
+    """
+    body = request.get_json() or {}
+    
+    llm_name = body.get("llm_name")
+    n_ctx = int(body.get("n_ctx", 4096))
+    n_gpu_layers = int(body.get("n_gpu_layers", -1))
+    
+    try:
+        results = benchmark_rag_metrics(
+            llm_name=llm_name,
+            n_ctx=n_ctx,
+            n_gpu_layers=n_gpu_layers
+        )
+        
+        if "error" in results:
+            return jsonify(results), 400
+        
+        return jsonify({"ok": True, **results})
+    except Exception as e:
+        return jsonify({
+            "error": "benchmark failed",
+            "details": str(e)
+        }), 500

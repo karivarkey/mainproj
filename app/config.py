@@ -23,6 +23,41 @@ RAG_META_FILE = RAG_DIR / "metadata.json"
 NLLB_MODEL = "facebook/nllb-200-distilled-600M"
 TRANSLATOR_QUANTIZE = os.environ.get("TRANSLATOR_QUANTIZE", "8bit")  # 'none', '8bit', or '4bit'
 
+# ONNX Translator configuration (M2M-100)
+ONNX_MODELS_DIR = TRANS_DIR / "m2m100_onnx"
+ONNX_TOKENIZER_DIR = TRANS_DIR / "m2m100_tokenizer"  # Local tokenizer for offline use
+USE_ONNX_TRANSLATOR = os.environ.get("USE_ONNX_TRANSLATOR", "true").lower() in ("1", "true", "yes")  # Default to ONNX
+# Best-performing model variants (W8A32 = weight 8-bit quantization, activation 32-bit)
+ONNX_ENCODER_MODEL = "m2m100_encoder_w8a32_SAFE.onnx"  # Safe W8A32 variant
+ONNX_DECODER_MODEL = "m2m100_decoder_w8a32.onnx"      # W8A32 decoder
+ONNX_LM_HEAD_MODEL = "m2m100_lm_head.onnx"
+
+# M2M-100 language codes (ISO 639-1, simple two-letter codes)
+# M2M-100 tokenizer uses just "hi", "en", "ta", etc.
+ONNX_LANG_MAP = {
+    "hi": "hi",            # Hindi
+    "en": "en",            # English
+    "ta": "ta",            # Tamil
+    "te": "te",            # Telugu
+    "kn": "kn",            # Kannada
+    "ml": "ml",            # Malayalam
+    "mr": "mr",            # Marathi
+    "gu": "gu",            # Gujarati
+    "bn": "bn",            # Bengali
+    "pa": "pa",            # Punjabi
+    "ur": "ur",            # Urdu
+    "as": "as",            # Assamese
+    "or": "or",            # Odia
+    "sa": "sa",            # Sanskrit
+    "fr": "fr",            # French
+    "de": "de",            # German
+    "es": "es",            # Spanish
+    "pt": "pt",            # Portuguese
+    "ja": "ja",            # Japanese
+    "zh": "zh",            # Chinese
+    "ru": "ru",            # Russian
+}
+
 # NLLB language codes (ISO 639-3 with script)
 NLLB_LANG_MAP = {
     "hi": "hin_Deva",      # Hindi
@@ -51,6 +86,8 @@ NLLB_LANG_MAP = {
 # Language configuration used by /infer. LANG_CONF is the single source of truth; LANG_MAP and
 # LANG_ALIASES are derived for backwards compatibility and convenience.
 LANG_CONF = {
+    # English
+    "en": {"src": "eng_Latn", "tgt": "eng_Latn", "aliases": ["eng"]},
     # Indo-Aryan
     "hi": {"src": "hin_Deva", "tgt": "eng_Latn", "aliases": ["hin"]},
     "bn": {"src": "ben_Beng", "tgt": "eng_Latn", "aliases": ["ben"]},
@@ -77,6 +114,15 @@ LANG_CONF = {
     "te": {"src": "tel_Telu", "tgt": "eng_Latn", "aliases": ["tel"]},
     "kn": {"src": "kan_Knda", "tgt": "eng_Latn", "aliases": ["kan"]},
     "ml": {"src": "mal_Mlym", "tgt": "eng_Latn", "aliases": ["mal"]},
+    # European languages
+    "fr": {"src": "fra_Latn", "tgt": "eng_Latn", "aliases": []},
+    "de": {"src": "deu_Latn", "tgt": "eng_Latn", "aliases": []},
+    "es": {"src": "spa_Latn", "tgt": "eng_Latn", "aliases": []},
+    "pt": {"src": "por_Latn", "tgt": "eng_Latn", "aliases": []},
+    "ru": {"src": "rus_Cyrl", "tgt": "eng_Latn", "aliases": []},
+    # East Asian languages
+    "ja": {"src": "jpn_Jpan", "tgt": "eng_Latn", "aliases": []},
+    "zh": {"src": "zho_Hans", "tgt": "eng_Latn", "aliases": []},
 }
 
 LANG_ALIASES = {}
@@ -114,3 +160,4 @@ def ensure_dirs():
     LLM_DIR.mkdir(parents=True, exist_ok=True)
     TRANS_DIR.mkdir(parents=True, exist_ok=True)
     RAG_DIR.mkdir(exist_ok=True)  # also creates query cache directory
+    RAG_DIR.mkdir(exist_ok=True)
