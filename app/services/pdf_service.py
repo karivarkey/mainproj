@@ -5,29 +5,21 @@ import nltk
 
 
 def _ensure_punkt():
-    """Ensure NLTK punkt tokenizer is available; try to download if missing."""
+    """Ensure NLTK punkt tokenizer is available."""
     try:
         nltk.data.find("tokenizers/punkt")
-        return True
     except LookupError:
-        try:
-            nltk.download("punkt", quiet=True)
-            nltk.data.find("tokenizers/punkt")
-            return True
-        except Exception:
-            return False
+        nltk.download("punkt", quiet=True)
 
 
-# Try to ensure punkt at import time, but we will also handle failures at runtime.
+# Ensure tokenizer at import time
 _ensure_punkt()
 
 
 # ---------- PDF EXTRACTION ----------
 
 def _extract_pdf_text(path: str) -> str:
-    """
-    Extract raw text from a text-based PDF.
-    """
+    """Extract raw text from a text-based PDF."""
     doc = fitz.open(path)
     pages = []
 
@@ -42,12 +34,7 @@ def _extract_pdf_text(path: str) -> str:
 # ---------- NORMALIZATION ----------
 
 def _normalize_text(text: str) -> str:
-    """
-    Clean up PDF text noise:
-    - normalize whitespace
-    - remove junk newlines
-    - strip unicode artifacts
-    """
+    """Clean up PDF text noise."""
     text = text.replace("\xa0", " ")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{2,}", "\n", text)
@@ -62,20 +49,13 @@ def _chunk_text(
     max_words: int = 350,
     overlap: int = 75,
 ) -> List[str]:
-    """
-    Sentence-aware chunking with overlap.
-    """
-    # Use NLTK's sentence tokenizer only if punkt is available and works.
-    sentences = None
-    if _ensure_punkt():
-        try:
-            from nltk.tokenize import sent_tokenize as _nltk_sent_tokenize
-            sentences = _nltk_sent_tokenize(text)
-        except Exception:
-            sentences = None
+    """Sentence-aware chunking with overlap."""
 
-    if sentences is None:
-        # Fallback: naive regex-based sentence splitter
+    from nltk.tokenize import sent_tokenize
+
+    try:
+        sentences = sent_tokenize(text)
+    except Exception:
         sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
 
     chunks = []
@@ -105,20 +85,22 @@ def _chunk_text(
     return chunks
 
 
+# ---------- PUBLIC API ----------
+
 def ingest_pdf(
     path: str,
     *,
     max_words: int = 350,
     overlap: int = 75,
 ) -> List[str]:
-    """
-    Public API: PDF -> cleaned text chunks
-    """
+    """PDF → cleaned text chunks."""
+
     raw_text = _extract_pdf_text(path)
     if not raw_text.strip():
         return []
 
     clean_text = _normalize_text(raw_text)
+
     chunks = _chunk_text(
         clean_text,
         max_words=max_words,

@@ -1,0 +1,25 @@
+# --- Server ---
+Flask
+flask-cors
+psutil
+requests
+
+# --- Math / core ---
+numpy
+
+# --- LLM (CPU, offline) ---
+llama-cpp-python
+
+# --- RAG ---
+sentence-transformers
+faiss-cpu
+ 
+
+# --- Tokenization / utils ---
+tokenizers
+regex
+safetensors
+
+# --- Evaluation ---
+sacrebleu
+
