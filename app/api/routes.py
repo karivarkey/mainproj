@@ -9,7 +9,7 @@ from pathlib import Path
 from werkzeug.utils import secure_filename
 import psutil
 import app.config as app_config
-from app.config import LANG_MAP, LANG_ALIASES, NLLB_LANG_MAP, USE_ONNX_TRANSLATOR, ONNX_LANG_MAP
+from app.config import LANG_MAP, LANG_ALIASES, NLLB_LANG_MAP, USE_ONNX_TRANSLATOR, ONNX_LANG_MAP, ONNX_MODEL_FAMILY, ONNX_BACKEND_NAME
 from app.services.cache_service import model_cache
 from app.services.llm_service import download_gguf, load_llm_from_gguf, llm_generate, llm_generate_stream, unload_llm, get_current_name, SERVER_URL
 from app.services.translator_service import translate, detect_supported_language, unload_translator, preload_translator, local_translator_path
@@ -152,6 +152,10 @@ def _get_effective_active_translator() -> str:
         return "nllb"
     return "nllb"
 
+
+def _public_translator_name(translator_key: str) -> str:
+    return ONNX_BACKEND_NAME if translator_key == "onnx" else "nllb"
+
 @bp.post("/download_llm")
 def ep_download_llm():
     body = request.get_json() or {}
@@ -200,15 +204,18 @@ def ep_current_llm():
 def ep_translator_status():
     """Get status of available translators (NLLB and ONNX)."""
     onnx_status = get_onnx_status()
-    active = _get_effective_active_translator()
+    active_key = _get_effective_active_translator()
+    active = _public_translator_name(active_key)
 
     nllb_path = local_translator_path(app_config.NLLB_MODEL)
     nllb_downloaded = nllb_path.exists() and any(nllb_path.iterdir())
-    onnx_downloaded_models = list_downloaded_onnx_model_files()
+    onnx_downloaded_models = list_downloaded_onnx_model_files(family=ONNX_MODEL_FAMILY)
     nllb_downloaded_models = [app_config.NLLB_MODEL] if nllb_downloaded else []
 
     return jsonify({
         "active_translator": active,
+        "active_translator_key": active_key,
+        "onnx_backend_name": ONNX_BACKEND_NAME,
         "onnx": onnx_status,
         "nllb": {
             "available": True,
@@ -218,9 +225,10 @@ def ep_translator_status():
         },
         "downloaded_models": {
             "onnx": onnx_downloaded_models,
+            ONNX_BACKEND_NAME: onnx_downloaded_models,
             "nllb": nllb_downloaded_models,
             "all": [
-                *[f"onnx:{name}" for name in onnx_downloaded_models],
+                *[f"{ONNX_BACKEND_NAME}:{name}" for name in onnx_downloaded_models],
                 *[f"nllb:{name}" for name in nllb_downloaded_models],
             ],
         },
@@ -231,9 +239,63 @@ def ep_translator_status():
 def ep_onnx_models_catalog():
     """List ONNX model files available in the configured Google Drive folder."""
     refresh = str(request.args.get("refresh", "false")).lower() in ("1", "true", "yes")
+    family = (request.args.get("family") or ONNX_MODEL_FAMILY).strip().lower()
     try:
-        catalog = get_onnx_catalog(force_refresh=refresh)
-        return jsonify({"ok": True, **catalog})
+        catalog = get_onnx_catalog(force_refresh=refresh, family=family)
+        tokenizer_ready = False
+        tokenizer_error = None
+        try:
+            from app.services.onnx_model_download_service import is_onnx_tokenizer_ready
+            tokenizer_ready = bool(is_onnx_tokenizer_ready(family=family))
+        except Exception as tokenizer_exc:
+            tokenizer_error = str(tokenizer_exc)
+        downloaded_files = list_downloaded_onnx_model_files(family=family)
+        downloaded_set = set(downloaded_files)
+        downloaded_name_set = {item.split("/")[-1] for item in downloaded_files}
+        default_files = catalog.get("default_files") or []
+        all_default_downloaded = all(
+            (
+                file_name in downloaded_set
+                or f"encoder/{file_name}" in downloaded_set
+                or f"decoder/{file_name}" in downloaded_set
+                or f"lm_head/{file_name}" in downloaded_set
+            )
+            for file_name in default_files
+        )
+
+        family_files_status = []
+        for file_item in (catalog.get("files") or []):
+            file_name = str(file_item.get("name") or "")
+            if not file_name:
+                continue
+            is_downloaded = (
+                file_name in downloaded_set
+                or f"encoder/{file_name}" in downloaded_set
+                or f"decoder/{file_name}" in downloaded_set
+                or f"lm_head/{file_name}" in downloaded_set
+                or file_name in downloaded_name_set
+            )
+            family_files_status.append({
+                "name": file_name,
+                "downloaded": bool(is_downloaded),
+            })
+
+        total_family_files = len(family_files_status)
+        downloaded_family_files = sum(1 for item in family_files_status if item["downloaded"])
+        all_family_downloaded = total_family_files > 0 and downloaded_family_files == total_family_files
+
+        return jsonify({
+            "ok": True,
+            **catalog,
+            "downloaded_files": downloaded_files,
+            "all_default_downloaded": all_default_downloaded,
+            "tokenizer_ready": tokenizer_ready,
+            "tokenizer_error": tokenizer_error,
+            "family_files_status": family_files_status,
+            "total_family_files": total_family_files,
+            "downloaded_family_files": downloaded_family_files,
+            "all_family_downloaded": all_family_downloaded,
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -249,6 +311,7 @@ def ep_onnx_models_download():
     """Download default or selected ONNX model files from Drive into local models directory."""
     body = request.get_json() or {}
     files = body.get("files")
+    family = (body.get("family") or ONNX_MODEL_FAMILY).strip().lower()
     include_tokenizer = body.get("include_tokenizer", True)
     if files is not None and not isinstance(files, list):
         return jsonify({"error": "files must be an array of file names"}), 400
@@ -256,7 +319,7 @@ def ep_onnx_models_download():
         return jsonify({"error": "include_tokenizer must be a boolean"}), 400
 
     try:
-        details = download_onnx_models(selected_files=files, include_tokenizer=include_tokenizer)
+        details = download_onnx_models(selected_files=files, include_tokenizer=include_tokenizer, family=family)
         return jsonify({"ok": True, **details})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -273,11 +336,12 @@ def ep_onnx_tokenizer_ensure():
     """Ensure ONNX tokenizer assets exist locally, downloading if required."""
     body = request.get_json(silent=True) or {}
     force_download = body.get("force_download", False)
+    family = (body.get("family") or ONNX_MODEL_FAMILY).strip().lower()
     if not isinstance(force_download, bool):
         return jsonify({"error": "force_download must be a boolean"}), 400
 
     try:
-        details = ensure_onnx_tokenizer(force_download=force_download)
+        details = ensure_onnx_tokenizer(force_download=force_download, family=family)
         return jsonify({"ok": True, **details})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -313,7 +377,9 @@ def ep_toggle_translator():
     
     return jsonify({
         "ok": True,
-        "active_translator": "onnx" if use_onnx else "nllb"
+        "active_translator": _public_translator_name("onnx" if use_onnx else "nllb"),
+        "active_translator_key": "onnx" if use_onnx else "nllb",
+        "onnx_backend_name": ONNX_BACKEND_NAME,
     })
 
 
@@ -339,7 +405,9 @@ def ep_translator_preload():
 
     return jsonify({
         "ok": True,
-        "active_translator": "onnx" if use_onnx else "nllb",
+        "active_translator": _public_translator_name("onnx" if use_onnx else "nllb"),
+        "active_translator_key": "onnx" if use_onnx else "nllb",
+        "onnx_backend_name": ONNX_BACKEND_NAME,
         "details": details,
     })
 
@@ -364,7 +432,8 @@ def ep_translate():
     if use_onnx:
         target_map = ONNX_LANG_MAP
         translate_fn = translate_onnx
-        backend = "onnx"
+        backend_key = "onnx"
+        backend = ONNX_BACKEND_NAME
         # For ONNX, use short codes (e.g., "hi" instead of "hin_Deva")
         src_code = src_lang_key
         
@@ -379,6 +448,7 @@ def ep_translate():
     else:
         target_map = NLLB_LANG_MAP
         translate_fn = translate
+        backend_key = "nllb"
         backend = "nllb"
         # For NLLB, use long codes from LANG_MAP (e.g., "hin_Deva")
         src_code, _ = LANG_MAP[src_lang_key]
@@ -391,18 +461,10 @@ def ep_translate():
 
     onnx_auto_download = None
     if use_onnx and not ensure_onnx_models():
-        try:
-            onnx_auto_download = ensure_default_onnx_models(force_download=False)
-        except Exception as e:
-            return jsonify({
-                "error": "onnx model auto-download failed",
-                "details": str(e),
-            }), 503
-        if not ensure_onnx_models():
-            return jsonify({
-                "error": "onnx models unavailable after auto-download",
-                "details": "Missing required ONNX files after auto-download attempt",
-            }), 503
+        return jsonify({
+            "error": "onnx models unavailable",
+            "details": "Download ONNX models explicitly via /onnx_models/download",
+        }), 503
 
     # Helper to iterate sentences from paragraphs
     sentence_end_re = re.compile(r"(.+?[.!?](?:\"|'|”)?)(\s+|$)", re.S)
@@ -443,6 +505,7 @@ def ep_translate():
             "translated_text": combined,
             "sentences": translated_sentences,
             "backend": backend,
+            "backend_key": backend_key,
             "auto_download": onnx_auto_download,
         })
 
@@ -452,6 +515,7 @@ def ep_translate():
             "detected_lang": src_lang_key,
             "target_lang": target_key,
             "backend": backend,
+            "backend_key": backend_key,
             "auto_download": onnx_auto_download,
         }
         yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
@@ -708,7 +772,8 @@ def ep_infer():
                 "final_output": answer_native,
                 "lang_used": lang,
                 "detected_lang": detected_lang,
-                "translator_backend": translation_backend,
+                "translator_backend": _public_translator_name(translation_backend),
+                "translator_backend_key": translation_backend,
                 "out_of_bounds": True,
             })
 
@@ -720,7 +785,8 @@ def ep_infer():
                 "prompt": None,
                 "lang_used": lang,
                 "detected_lang": detected_lang,
-                "translator_backend": translation_backend,
+                "translator_backend": _public_translator_name(translation_backend),
+                "translator_backend_key": translation_backend,
                 "rag_used": rag_docs,
                 "rag_context": context,
                 "cache_hit": cache_hit,
@@ -793,7 +859,8 @@ ANSWER:"""
             "final_output": answer_native,
             "lang_used": lang,
             "detected_lang": detected_lang,
-            "translator_backend": translation_backend,
+            "translator_backend": _public_translator_name(translation_backend),
+            "translator_backend_key": translation_backend,
         })
 
     # Streaming response (SSE). We will yield JSON payloads per translated sentence.
@@ -811,7 +878,8 @@ ANSWER:"""
             "prompt": final_prompt,
             "lang_used": lang,
             "detected_lang": detected_lang,
-            "translator_backend": translation_backend,
+            "translator_backend": _public_translator_name(translation_backend),
+            "translator_backend_key": translation_backend,
             "rag_used": rag_docs,
             "rag_context": context,
             "cache_hit": cache_hit,

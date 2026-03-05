@@ -29,11 +29,18 @@ class QueryCache:
     def __init__(self, cache_file: Path, similarity_threshold: float = 0.80, max_entries: int = 1000):
         self.cache_file = cache_file
         self.similarity_threshold = similarity_threshold
-        self.max_entries = max_entries
+        self.max_entries = max(1, int(max_entries))
         self.queries = []  # List of {text, embedding, rag_docs, timestamp}
         
         # Load cache from disk if it exists
         self.load()
+
+    def _enforce_max_entries(self) -> bool:
+        """Keep only the latest max_entries records. Returns True if trimmed."""
+        if len(self.queries) <= self.max_entries:
+            return False
+        self.queries = self.queries[-self.max_entries:]
+        return True
     
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """Compute cosine similarity between two vectors (both assumed normalized)."""
@@ -84,16 +91,13 @@ class QueryCache:
             query_embedding: 384-dim embedding
             rag_docs: List of RAG documents retrieved
         """
-        # Enforce max size (FIFO eviction)
-        if len(self.queries) >= self.max_entries:
-            self.queries.pop(0)
-        
         self.queries.append({
             "text": text,
             "embedding": query_embedding,
             "rag_docs": rag_docs,
             "timestamp": time.time(),
         })
+        self._enforce_max_entries()
         
         # Persist to disk
         self.save()
@@ -136,6 +140,8 @@ class QueryCache:
                     print(f"[QueryCache] Info: embedding dim mismatch ({len(emb)} vs {RAG_EMBEDDING_DIM}), clearing cache")
                     self.clear()
                     break
+            if self._enforce_max_entries():
+                self.save()
         except Exception as e:
             print(f"[QueryCache] Warning: Failed to load cache: {e}")
             self.queries = []

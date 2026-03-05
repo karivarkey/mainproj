@@ -104,10 +104,33 @@ class BackendManager:
         self.active.load()
         return self.active
 
+    def select(self, name: str):
+        if name not in self.backends:
+            raise ValueError(f"unknown backend: {name}")
+        self.active_name = name
+        self.active = None
+        return self.active_name
+
+    def unload(self):
+        self.active = None
+        self.active_name = None
+
+    def ensure_loaded(self):
+        if self.active is not None:
+            return self.active
+        if not self.active_name:
+            return None
+        return self.load(self.active_name)
+
     def get_active(self):
         return self.active
 
     def get_active_name(self):
+        return self.active_name
+
+    def get_loaded_name(self):
+        if self.active is None:
+            return None
         return self.active_name
 
 
@@ -120,8 +143,20 @@ def available_backends():
 def load_backend(name: str):
     return backend_manager.load(name)
 
+def select_backend(name: str):
+    return backend_manager.select(name)
+
+def unload_backend():
+    return backend_manager.unload()
+
+def ensure_active_backend_loaded():
+    return backend_manager.ensure_loaded()
+
 def get_active_backend():
     return backend_manager.get_active()
 
 def get_active_backend_name():
     return backend_manager.get_active_name()
+
+def get_loaded_backend_name():
+    return backend_manager.get_loaded_name()

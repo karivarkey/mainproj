@@ -5,9 +5,10 @@ from werkzeug.utils import secure_filename
 from . import bp
 from app.services.rag_service import (
     rag_add, rag_remove, rag_list, rag_clear, 
-    rag_retrieve, add_pdf_to_rag
+    rag_retrieve, add_pdf_to_rag, get_embed_model
 )
-from app.services.rag_backend import available_backends, load_backend, get_active_backend_name
+from app.services.rag_backend import available_backends, load_backend, get_active_backend_name, get_loaded_backend_name
+from app.services.rag_backend import select_backend, unload_backend
 
 @bp.post("/rag/add")
 def ep_rag_add():
@@ -52,13 +53,50 @@ def ep_rag_add_pdf():
         if os.path.exists(tmp_path): os.remove(tmp_path)
         if os.path.exists(tmp_dir): os.rmdir(tmp_dir)
 
+@bp.post("/rag/pdf/upload")
+def ep_rag_pdf_upload_compat():
+    return ep_rag_add_pdf()
+
 @bp.get("/rag/backends")
 def ep_rag_backends():
-    return jsonify({"available": available_backends(), "active": get_active_backend_name()})
+    return jsonify({
+        "available": available_backends(),
+        "active": get_active_backend_name(),
+        "loaded": get_loaded_backend_name(),
+    })
 
 @bp.post("/rag/swap_backend")
 def ep_rag_swap_backend():
     body = request.get_json() or {}
     name = body.get("backend")
-    load_backend(name)
+    select_backend(name)
     return jsonify({"ok": True, "active": name})
+
+
+@bp.post("/rag/unload_backend")
+@bp.post("/api/rag/unload_backend")
+def ep_rag_unload_backend():
+    unload_backend()
+    return jsonify({"ok": True, "active": None})
+
+@bp.post("/rag/backend/load")
+def ep_rag_backend_load_compat():
+    body = request.get_json() or {}
+    name = body.get("name") or body.get("backend")
+    if not name:
+        return jsonify({"error": "backend/name required"}), 400
+    load_backend(name)
+    get_embed_model()
+    return jsonify({"ok": True, "active": name, "embed_model_loaded": True})
+
+@bp.post("/rag/search")
+def ep_rag_search():
+    body = request.get_json(silent=True) or {}
+    query = (body.get("query") or body.get("text") or "").strip()
+    if not query:
+        return jsonify({"error": "query required"}), 400
+
+    top_k = int(body.get("top_k", 3))
+    similarity_threshold = float(body.get("similarity_threshold", 0.35))
+    results = rag_retrieve(query, top_k=top_k, similarity_threshold=similarity_threshold)
+    return jsonify({"ok": True, "results": results, "count": len(results)})

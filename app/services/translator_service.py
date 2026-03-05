@@ -37,6 +37,11 @@ def detect_supported_language(text: str):
 
     normalized = text.strip()
 
+    # Script heuristics for high-confidence non-Latin inputs.
+    # Japanese: Hiragana or Katakana presence is a strong signal.
+    if re.search(r"[\u3040-\u30FF]", normalized):
+        return "ja"
+
     # Heuristic: plain ASCII text is usually English in this app context.
     # Prevents false negatives for short phrases like "hi how are you".
     ascii_chars = sum(1 for ch in normalized if ord(ch) < 128)
@@ -48,6 +53,8 @@ def detect_supported_language(text: str):
         # Prefer ranked candidates and choose first supported alias.
         for candidate in detect_langs(normalized):
             short = candidate.lang.split("-")[0].lower()
+            if short == "jp":
+                short = "ja"
             resolved = LANG_ALIASES.get(short)
             if resolved:
                 return resolved
@@ -58,6 +65,8 @@ def detect_supported_language(text: str):
 
     # langdetect may return variants like "zh-cn"; we only care about the prefix
     short = detected.split("-")[0].lower()
+    if short == "jp":
+        short = "ja"
     return LANG_ALIASES.get(short)
 
 # Fix seed for deterministic language detection
@@ -271,3 +280,8 @@ def preload_translator(model_id: str = NLLB_MODEL):
     return {
         "model": model_id,
     }
+
+
+def is_translator_loaded(model_id: str = NLLB_MODEL) -> bool:
+    cache_key = f"{model_id}__{TRANSLATOR_QUANTIZE}"
+    return cache_key in translator_cache

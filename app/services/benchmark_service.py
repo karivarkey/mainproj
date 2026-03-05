@@ -9,7 +9,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from pathlib import Path
 from sacrebleu.metrics import BLEU, CHRF
-from app.config import CPU_ONLY, LLM_DIR, RAG_INDEX_FILE, RAG_META_FILE, USE_ONNX_TRANSLATOR, ONNX_LANG_MAP, LLM_DEFAULT_MAX_TOKENS
+from app.config import CPU_ONLY, LLM_DIR, RAG_INDEX_FILE, RAG_META_FILE, USE_ONNX_TRANSLATOR, ONNX_LANG_MAP, ONNX_BACKEND_NAME, LLM_DEFAULT_MAX_TOKENS
 from app.services.translator_service import translate, unload_translator
 from app.services.onnx_translator_service import translate_onnx, unload_onnx_translator
 from app.services.llm_service import llm_generate, llm_generate_stream, load_llm, unload_llm, local_gguf_path
@@ -17,6 +17,98 @@ from app.services.rag_service import rag_add, rag_clear, rag_list, rag_retrieve
 
 # evaluation utilities
 from app.services.query_cache_service import QueryCache
+
+APP_TO_FLORES_LANG = {
+    "en": "eng_Latn",
+    "hi": "hin_Deva",
+    "bn": "ben_Beng",
+    "mr": "mar_Deva",
+    "gu": "guj_Gujr",
+    "pa": "pan_Guru",
+    "ur": "urd_Arab",
+    "as": "asm_Beng",
+    "or": "ory_Orya",
+    "ta": "tam_Taml",
+    "te": "tel_Telu",
+    "kn": "kan_Knda",
+    "ml": "mal_Mlym",
+    "fr": "fra_Latn",
+    "de": "deu_Latn",
+    "es": "spa_Latn",
+    "pt": "por_Latn",
+    "ru": "rus_Cyrl",
+    "ja": "jpn_Jpan",
+    "zh": "zho_Hans",
+}
+
+
+def _resolve_flores_code(lang: str) -> str:
+    value = str(lang or "").strip()
+    if value in APP_TO_FLORES_LANG.values():
+        return value
+    return APP_TO_FLORES_LANG.get(value, value)
+
+
+def _load_flores_pairs(
+    src_lang: str,
+    tgt_lang: str,
+    split: str = "devtest",
+    max_samples: int = 100,
+    source_file: str | None = None,
+    target_file: str | None = None,
+) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+
+    if source_file and target_file:
+        src_path = Path(source_file)
+        tgt_path = Path(target_file)
+        if (not src_path.exists()) or (not tgt_path.exists()):
+            raise FileNotFoundError("FLORES source/target file not found")
+
+        src_lines = [line.strip() for line in src_path.read_text(encoding="utf-8").splitlines()]
+        tgt_lines = [line.strip() for line in tgt_path.read_text(encoding="utf-8").splitlines()]
+        count = min(len(src_lines), len(tgt_lines))
+        for i in range(count):
+            src_text = src_lines[i]
+            tgt_text = tgt_lines[i]
+            if src_text and tgt_text:
+                pairs.append((src_text, tgt_text))
+                if len(pairs) >= max_samples:
+                    break
+        return pairs
+
+    try:
+        from datasets import load_dataset
+    except Exception as e:
+        raise RuntimeError(
+            "FLORES-200 loading requires `datasets` package (pip install datasets), "
+            "or provide local source_file/target_file."
+        ) from e
+
+    src_code = _resolve_flores_code(src_lang)
+    tgt_code = _resolve_flores_code(tgt_lang)
+    src_col = f"sentence_{src_code}"
+    tgt_col = f"sentence_{tgt_code}"
+
+    try:
+        dataset = load_dataset(
+            "facebook/flores",
+            "all",
+            split=split,
+            trust_remote_code=True,
+        )
+    except TypeError:
+        dataset = load_dataset("facebook/flores", "all", split=split)
+    for row in dataset:
+        src_text = str(row.get(src_col, "")).strip()
+        tgt_text = str(row.get(tgt_col, "")).strip()
+        if not src_text or not tgt_text:
+            continue
+        pairs.append((src_text, tgt_text))
+        if len(pairs) >= max_samples:
+            break
+
+    return pairs
 
 def measure_time(fn, *args, **kwargs):
     """Utility to time any function call."""
@@ -822,7 +914,16 @@ def benchmark_llm_metrics(llm_name: str, n_ctx: int = 4096, n_gpu_layers: int = 
     return results
 
 
-def benchmark_translator_metrics(src_lang: str, tgt_lang: str = "en", use_onnx: bool = None):
+def benchmark_translator_metrics(
+    src_lang: str,
+    tgt_lang: str = "en",
+    use_onnx: bool = None,
+    dataset: str = "demo",
+    flores_split: str = "devtest",
+    flores_samples: int = 100,
+    flores_source_file: str | None = None,
+    flores_target_file: str | None = None,
+):
     """
     Comprehensive translator performance metrics.
     
@@ -846,7 +947,112 @@ def benchmark_translator_metrics(src_lang: str, tgt_lang: str = "en", use_onnx: 
     
     translate_fn = translate_onnx if use_onnx else translate
     unload_fn = unload_onnx_translator if use_onnx else unload_translator
-    backend = "onnx" if use_onnx else "nllb"
+    backend = ONNX_BACKEND_NAME if use_onnx else "nllb"
+    # FLORES-200 corpus evaluation mode
+    if str(dataset).strip().lower() in {"flores", "flores200", "flores-200"}:
+        try:
+            pairs = _load_flores_pairs(
+                src_lang=src_lang,
+                tgt_lang=tgt_lang,
+                split=flores_split,
+                max_samples=max(1, int(flores_samples)),
+                source_file=flores_source_file,
+                target_file=flores_target_file,
+            )
+        except Exception as e:
+            return {"error": f"FLORES-200 loading failed: {e}"}
+
+        if not pairs:
+            return {"error": "FLORES-200 returned no usable sentence pairs for selected language pair."}
+
+        print(f"[BENCHMARK] Warming up {backend} translator for FLORES-200...")
+        try:
+            _ = translate_fn("Technology connects people.", "en", "hi", max_tokens=50)
+        except Exception:
+            pass
+
+        gc.collect()
+        if torch.cuda.is_available() and not CPU_ONLY:
+            torch.cuda.empty_cache()
+        time.sleep(0.2)
+
+        bleu = BLEU()
+        chrf = CHRF()
+        baseline_mem = memory_snapshot()
+
+        hypotheses: list[str] = []
+        references: list[str] = []
+        per_sample_times: list[float] = []
+        total_src_chars = 0
+        total_src_tokens = 0
+
+        for src_text, ref_text in pairs:
+            start = time.perf_counter()
+            hyp_text = translate_fn(src_text, src_lang, tgt_lang, max_tokens=512)
+            end = time.perf_counter()
+
+            hypotheses.append(str(hyp_text).strip())
+            references.append(str(ref_text).strip())
+            per_sample_times.append(end - start)
+            total_src_chars += len(src_text)
+            total_src_tokens += len(src_text.split())
+
+        peak_mem = memory_snapshot()
+        total_time_s = float(sum(per_sample_times))
+
+        corpus_bleu = bleu.corpus_score(hypotheses, [references]).score
+        corpus_chrf = chrf.corpus_score(hypotheses, [references]).score
+
+        avg_time_s = total_time_s / len(per_sample_times) if per_sample_times else 0.0
+        chars_per_sec = total_src_chars / total_time_s if total_time_s > 0 else 0.0
+        tokens_per_sec = total_src_tokens / total_time_s if total_time_s > 0 else 0.0
+
+        unload_fn()
+
+        results = {
+            "dataset": {
+                "name": "FLORES-200",
+                "split": flores_split,
+                "samples_evaluated": len(hypotheses),
+                "src_lang": src_lang,
+                "tgt_lang": tgt_lang,
+                "backend": backend,
+                "source": "local_files" if (flores_source_file and flores_target_file) else "huggingface",
+            },
+            "quality": {
+                "corpus_bleu": round(corpus_bleu, 2),
+                "corpus_chrf": round(corpus_chrf, 2),
+            },
+            "throughput": {
+                "avg_time_per_sentence_s": round(avg_time_s, 4),
+                "chars_per_sec": round(chars_per_sec, 2),
+                "tokens_per_sec": round(tokens_per_sec, 2),
+                "total_time_s": round(total_time_s, 3),
+            },
+            "memory": {
+                "baseline_rss_mb": round(baseline_mem["rss_mb"], 2),
+                "peak_rss_mb": round(peak_mem["rss_mb"], 2),
+                "increase_mb": round(peak_mem["rss_mb"] - baseline_mem["rss_mb"], 2),
+            },
+            "examples": [
+                {
+                    "source": pairs[i][0],
+                    "reference": references[i],
+                    "hypothesis": hypotheses[i],
+                }
+                for i in range(min(5, len(hypotheses)))
+            ],
+        }
+
+        if torch.cuda.is_available() and not CPU_ONLY:
+            results["vram"] = {
+                "baseline_used_mb": round(baseline_mem["vram_used_mb"], 2),
+                "peak_used_mb": round(peak_mem["vram_used_mb"], 2),
+                "total_mb": round(peak_mem["vram_total_mb"], 2),
+            }
+
+        return results
+
     # Complex demo texts for different languages
     DEMO_TEXTS = {
         # Indian Languages

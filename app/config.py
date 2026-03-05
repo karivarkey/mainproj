@@ -23,18 +23,67 @@ RAG_META_FILE = RAG_DIR / "metadata.json"
 NLLB_MODEL = "facebook/nllb-200-distilled-600M"
 TRANSLATOR_QUANTIZE = os.environ.get("TRANSLATOR_QUANTIZE", "8bit")  # 'none', '8bit', or '4bit'
 
-# ONNX Translator configuration (M2M-100)
-ONNX_MODELS_DIR = TRANS_DIR / "m2m100_onnx"
-ONNX_TOKENIZER_DIR = TRANS_DIR / "m2m100_tokenizer"  # Local tokenizer for offline use
+# ONNX Translator configuration
 USE_ONNX_TRANSLATOR = os.environ.get("USE_ONNX_TRANSLATOR", "true").lower() in ("1", "true", "yes")  # Default to ONNX
-# Best-performing model variants (W8A32 = weight 8-bit quantization, activation 32-bit)
-ONNX_ENCODER_MODEL = "m2m100_encoder_w8a32_SAFE.onnx"  # Safe W8A32 variant
-ONNX_DECODER_MODEL = "m2m100_decoder_w8a32.onnx"      # W8A32 decoder
-ONNX_LM_HEAD_MODEL = "m2m100_lm_head.onnx"
+ONNX_MODEL_FAMILY = os.environ.get("ONNX_MODEL_FAMILY", "m2m").strip().lower()  # m2m | nllb
+if ONNX_MODEL_FAMILY not in ("m2m", "nllb"):
+    ONNX_MODEL_FAMILY = "m2m"
+
+ONNX_DRIVE_FOLDERS = {
+    "m2m": {
+        "url": "https://drive.google.com/drive/folders/1tN4wqRMMCWfdy-nXOCjaMTv-H5Paj8Zi?usp=drive_link",
+        "id": "1tN4wqRMMCWfdy-nXOCjaMTv-H5Paj8Zi",
+    },
+    "nllb": {
+        "url": "https://drive.google.com/drive/folders/1WCd3JSVEGF-r38j1KDSykjs23I8_kfVq?usp=sharing",
+        "id": "1WCd3JSVEGF-r38j1KDSykjs23I8_kfVq",
+    },
+}
+
+ONNX_FAMILY_CONFIG = {
+    "m2m": {
+        "models_dir": TRANS_DIR / "m2m100_onnx",
+        "tokenizer_dir": TRANS_DIR / "m2m100_tokenizer",
+        "tokenizer_model": "facebook/m2m100_418M",
+        "encoder_model": "m2m100_encoder_w8a32_SAFE.onnx",
+        "decoder_model": "m2m100_decoder_w8a32.onnx",
+        "lm_head_model": "m2m100_lm_head.onnx",
+        "default_files": [
+            "m2m100_encoder_w8a32_SAFE.onnx",
+            "m2m100_decoder_w8a32.onnx",
+            "m2m100_lm_head.onnx",
+            "m2m100_lm_head.onnx.data",
+        ],
+    },
+    "nllb": {
+        "models_dir": TRANS_DIR / "nllb_onnx",
+        "tokenizer_dir": TRANS_DIR / "nllb_onnx_tokenizer",
+        "tokenizer_model": "facebook/nllb-200-distilled-600M",
+        "encoder_model": "nllb_encoder_w8a32_safe.onnx",
+        "decoder_model": "nllb_decoder_w8a32_safe.onnx",
+        "lm_head_model": "nllb_lm_head_w8a32_safe.onnx",
+        "default_files": [
+            "nllb_encoder_w8a32_safe.onnx",
+            "nllb_decoder_w8a32_safe.onnx",
+            "nllb_lm_head_w8a32_safe.onnx",
+        ],
+    },
+}
+
+_onnx_selected = ONNX_FAMILY_CONFIG[ONNX_MODEL_FAMILY]
+ONNX_MODELS_DIR = _onnx_selected["models_dir"]
+ONNX_TOKENIZER_DIR = _onnx_selected["tokenizer_dir"]  # Local tokenizer for offline use
+ONNX_TOKENIZER_MODEL = _onnx_selected["tokenizer_model"]
+ONNX_ENCODER_MODEL = _onnx_selected["encoder_model"]
+ONNX_DECODER_MODEL = _onnx_selected["decoder_model"]
+ONNX_LM_HEAD_MODEL = _onnx_selected["lm_head_model"]
+ONNX_DEFAULT_MODEL_FILES = list(_onnx_selected["default_files"])
+ONNX_DRIVE_FOLDER_URL = ONNX_DRIVE_FOLDERS[ONNX_MODEL_FAMILY]["url"]
+ONNX_DRIVE_FOLDER_ID = ONNX_DRIVE_FOLDERS[ONNX_MODEL_FAMILY]["id"]
 
 # M2M-100 language codes (ISO 639-1, simple two-letter codes)
 # M2M-100 tokenizer uses just "hi", "en", "ta", etc.
-ONNX_LANG_MAP = {
+ONNX_M2M_LANG_MAP = {
     "hi": "hi",            # Hindi
     "en": "en",            # English
     "ta": "ta",            # Tamil
@@ -82,6 +131,10 @@ NLLB_LANG_MAP = {
     "zh": "zho_Hans",      # Chinese (Simplified)
     "ru": "rus_Cyrl",      # Russian
 }
+
+ONNX_NLLB_LANG_MAP = dict(NLLB_LANG_MAP)
+ONNX_LANG_MAP = ONNX_M2M_LANG_MAP if ONNX_MODEL_FAMILY == "m2m" else ONNX_NLLB_LANG_MAP
+ONNX_BACKEND_NAME = "m2m_onnx" if ONNX_MODEL_FAMILY == "m2m" else "nllb_onnx"
 
 # Language configuration used by /infer. LANG_CONF is the single source of truth; LANG_MAP and
 # LANG_ALIASES are derived for backwards compatibility and convenience.
@@ -136,6 +189,12 @@ RAG_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 RAG_EMBEDDING_DIM = 384
 RAG_SIMILARITY_THRESHOLD = 0.35
 RAG_TOP_K = 3
+
+# Query cache configuration
+QUERY_CACHE_FILE = BASE / "query_cache.json"
+QUERY_CACHE_SIMILARITY_THRESHOLD = 0.80
+QUERY_CACHE_MAX_ENTRIES = 3
+QUERY_CACHE_ENABLED = True
 
 # LLM configuration defaults
 LLM_DEFAULT_N_CTX = 4096

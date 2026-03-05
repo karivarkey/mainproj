@@ -8,29 +8,44 @@ from typing import Dict, List, Tuple
 
 import requests
 
-from app.config import ONNX_MODELS_DIR, ONNX_TOKENIZER_DIR
-
-DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1tN4wqRMMCWfdy-nXOCjaMTv-H5Paj8Zi?usp=drive_link"
-DRIVE_FOLDER_ID = "1tN4wqRMMCWfdy-nXOCjaMTv-H5Paj8Zi"
-
-DEFAULT_MODEL_FILES = [
-    "m2m100_encoder_w8a32_SAFE.onnx",
-    "m2m100_decoder_w8a32.onnx",
-    "m2m100_lm_head.onnx",
-    "m2m100_lm_head.onnx.data",
-]
-DEFAULT_TOKENIZER_MODEL = "facebook/m2m100_418M"
+from app.config import (
+    ONNX_MODEL_FAMILY,
+    ONNX_FAMILY_CONFIG,
+    ONNX_DRIVE_FOLDERS,
+)
+from app.services.cache_service import set_onnx_family_cache
 
 # Simple in-memory cache to avoid re-scraping Drive for every request
 _catalog_cache: Dict[str, object] = {
-    "ts": 0.0,
-    "files": [],
+    "m2m": {"ts": 0.0, "files": []},
+    "nllb": {"ts": 0.0, "files": []},
 }
 CATALOG_TTL_SECONDS = 300
 
 
-def _embedded_folder_list_url() -> str:
-    return f"https://drive.google.com/embeddedfolderview?id={DRIVE_FOLDER_ID}#list"
+def _normalize_family(family: str | None = None) -> str:
+    selected = (family or ONNX_MODEL_FAMILY or "m2m").strip().lower()
+    return selected if selected in ONNX_FAMILY_CONFIG else "m2m"
+
+
+def _family_settings(family: str | None = None) -> Dict[str, object]:
+    selected = _normalize_family(family)
+    folder_info = ONNX_DRIVE_FOLDERS[selected]
+    family_cfg = ONNX_FAMILY_CONFIG[selected]
+    return {
+        "family": selected,
+        "models_dir": family_cfg["models_dir"],
+        "tokenizer_dir": family_cfg["tokenizer_dir"],
+        "tokenizer_model": family_cfg["tokenizer_model"],
+        "default_files": list(family_cfg["default_files"]),
+        "folder_url": folder_info["url"],
+        "folder_id": folder_info["id"],
+    }
+
+
+def _embedded_folder_list_url(family: str | None = None) -> str:
+    settings = _family_settings(family)
+    return f"https://drive.google.com/embeddedfolderview?id={settings['folder_id']}#list"
 
 
 def _normalize_name(name: str) -> str:
@@ -67,8 +82,8 @@ def _parse_drive_embedded_listing(content: str) -> List[Dict[str, str]]:
     return out
 
 
-def _fetch_drive_catalog() -> List[Dict[str, str]]:
-    resp = requests.get(_embedded_folder_list_url(), timeout=30)
+def _fetch_drive_catalog(family: str | None = None) -> List[Dict[str, str]]:
+    resp = requests.get(_embedded_folder_list_url(family), timeout=30)
     resp.raise_for_status()
     files = _parse_drive_embedded_listing(resp.text)
     if not files:
@@ -76,41 +91,48 @@ def _fetch_drive_catalog() -> List[Dict[str, str]]:
     return files
 
 
-def get_onnx_catalog(force_refresh: bool = False) -> Dict[str, object]:
+def get_onnx_catalog(force_refresh: bool = False, family: str | None = None) -> Dict[str, object]:
+    settings = _family_settings(family)
+    selected = settings["family"]
     now = time.time()
-    cached_ts = float(_catalog_cache.get("ts") or 0.0)
-    cached_files = _catalog_cache.get("files") or []
+    cache_bucket = _catalog_cache.setdefault(selected, {"ts": 0.0, "files": []})
+    cached_ts = float(cache_bucket.get("ts") or 0.0)
+    cached_files = cache_bucket.get("files") or []
 
     if (not force_refresh) and cached_files and (now - cached_ts < CATALOG_TTL_SECONDS):
         files = cached_files
     else:
-        files = _fetch_drive_catalog()
-        _catalog_cache["ts"] = now
-        _catalog_cache["files"] = files
+        files = _fetch_drive_catalog(selected)
+        cache_bucket["ts"] = now
+        cache_bucket["files"] = files
 
     sorted_files = sorted(files, key=lambda item: item["name"].lower())
     return {
-        "folder_url": DRIVE_FOLDER_URL,
-        "folder_id": DRIVE_FOLDER_ID,
-        "default_files": DEFAULT_MODEL_FILES,
+        "family": selected,
+        "folder_url": settings["folder_url"],
+        "folder_id": settings["folder_id"],
+        "default_files": settings["default_files"],
         "files": sorted_files,
     }
 
 
-def _destination_for_model(filename: str) -> Path:
+def _destination_for_model(filename: str, family: str | None = None) -> Path:
+    settings = _family_settings(family)
+    models_dir: Path = settings["models_dir"]
     name = filename.lower()
-    if name.startswith("m2m100_encoder"):
-        return ONNX_MODELS_DIR / "encoder" / filename
-    if name.startswith("m2m100_decoder"):
-        return ONNX_MODELS_DIR / "decoder" / filename
-    if name.startswith("m2m100_lm_head") or name.startswith("lm_head"):
-        return ONNX_MODELS_DIR / "lm_head" / filename
-    return ONNX_MODELS_DIR / filename
+    if "encoder" in name:
+        return models_dir / "encoder" / filename
+    if "decoder" in name:
+        return models_dir / "decoder" / filename
+    if "lm_head" in name or name.startswith("lm_head"):
+        return models_dir / "lm_head" / filename
+    return models_dir / filename
 
 
-def is_default_onnx_models_ready() -> bool:
-    for filename in DEFAULT_MODEL_FILES:
-        path = _destination_for_model(filename)
+def is_default_onnx_models_ready(family: str | None = None) -> bool:
+    settings = _family_settings(family)
+    for filename in settings["default_files"]:
+        path = _destination_for_model(filename, settings["family"])
         if (not path.exists()) or path.stat().st_size < 1024:
             return False
         try:
@@ -123,28 +145,40 @@ def is_default_onnx_models_ready() -> bool:
     return True
 
 
-def ensure_default_onnx_models(force_download: bool = False) -> Dict[str, object]:
-    if is_default_onnx_models_ready() and not force_download:
+def ensure_default_onnx_models(force_download: bool = False, family: str | None = None) -> Dict[str, object]:
+    settings = _family_settings(family)
+    selected = settings["family"]
+    if is_default_onnx_models_ready(selected) and not force_download:
         return {
             "ready": True,
             "downloaded": False,
-            "requested_files": DEFAULT_MODEL_FILES,
+            "family": selected,
+            "requested_files": settings["default_files"],
         }
 
-    details = download_onnx_models(selected_files=DEFAULT_MODEL_FILES, include_tokenizer=False)
+    details = download_onnx_models(
+        selected_files=settings["default_files"],
+        include_tokenizer=False,
+        family=selected,
+    )
     return {
-        "ready": is_default_onnx_models_ready(),
+        "ready": is_default_onnx_models_ready(selected),
         "downloaded": True,
+        "family": selected,
         **details,
     }
 
 
-def list_downloaded_onnx_model_files() -> List[str]:
-    if not ONNX_MODELS_DIR.exists():
+def list_downloaded_onnx_model_files(family: str | None = None) -> List[str]:
+    settings = _family_settings(family)
+    selected = settings["family"]
+    models_dir: Path = settings["models_dir"]
+    if not models_dir.exists():
+        set_onnx_family_cache(selected, downloaded_files=[], tokenizer_ready=is_onnx_tokenizer_ready(selected))
         return []
 
     files: List[str] = []
-    for path in ONNX_MODELS_DIR.rglob("*"):
+    for path in models_dir.rglob("*"):
         if not path.is_file():
             continue
         name = path.name.lower()
@@ -155,24 +189,28 @@ def list_downloaded_onnx_model_files() -> List[str]:
                 continue
         except Exception:
             continue
-        files.append(str(path.relative_to(ONNX_MODELS_DIR)).replace("\\", "/"))
+        files.append(str(path.relative_to(models_dir)).replace("\\", "/"))
 
-    return sorted(files)
+    files = sorted(files)
+    set_onnx_family_cache(selected, downloaded_files=files, tokenizer_ready=is_onnx_tokenizer_ready(selected))
+    return files
 
 
-def is_onnx_tokenizer_ready() -> bool:
-    if not ONNX_TOKENIZER_DIR.exists():
+def is_onnx_tokenizer_ready(family: str | None = None) -> bool:
+    settings = _family_settings(family)
+    tokenizer_dir: Path = settings["tokenizer_dir"]
+    if not tokenizer_dir.exists():
         return False
 
-    required_config = ONNX_TOKENIZER_DIR / "tokenizer_config.json"
+    required_config = tokenizer_dir / "tokenizer_config.json"
     if (not required_config.exists()) or required_config.stat().st_size <= 0:
         return False
 
     candidate_tokenizer_assets = [
-        ONNX_TOKENIZER_DIR / "sentencepiece.bpe.model",
-        ONNX_TOKENIZER_DIR / "sentencepiece.model",
-        ONNX_TOKENIZER_DIR / "tokenizer.model",
-        ONNX_TOKENIZER_DIR / "tokenizer.json",
+        tokenizer_dir / "sentencepiece.bpe.model",
+        tokenizer_dir / "sentencepiece.model",
+        tokenizer_dir / "tokenizer.model",
+        tokenizer_dir / "tokenizer.json",
     ]
 
     for asset in candidate_tokenizer_assets:
@@ -185,13 +223,20 @@ def is_onnx_tokenizer_ready() -> bool:
     return False
 
 
-def ensure_onnx_tokenizer(force_download: bool = False) -> Dict[str, object]:
-    if is_onnx_tokenizer_ready() and not force_download:
+def ensure_onnx_tokenizer(force_download: bool = False, family: str | None = None) -> Dict[str, object]:
+    settings = _family_settings(family)
+    selected = settings["family"]
+    tokenizer_dir: Path = settings["tokenizer_dir"]
+    tokenizer_model: str = settings["tokenizer_model"]
+
+    if is_onnx_tokenizer_ready(selected) and not force_download:
+        set_onnx_family_cache(selected, tokenizer_ready=True)
         return {
             "ready": True,
-            "path": str(ONNX_TOKENIZER_DIR),
+            "family": selected,
+            "path": str(tokenizer_dir),
             "downloaded": False,
-            "model": DEFAULT_TOKENIZER_MODEL,
+            "model": tokenizer_model,
         }
 
     try:
@@ -199,27 +244,30 @@ def ensure_onnx_tokenizer(force_download: bool = False) -> Dict[str, object]:
     except Exception as e:
         raise RuntimeError(f"transformers is required to prepare tokenizer: {e}") from e
 
-    ONNX_TOKENIZER_DIR.mkdir(parents=True, exist_ok=True)
+    tokenizer_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         try:
-            tokenizer = AutoTokenizer.from_pretrained(DEFAULT_TOKENIZER_MODEL)
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_model)
         except Exception:
-            tokenizer = M2M100Tokenizer.from_pretrained(DEFAULT_TOKENIZER_MODEL)
-        tokenizer.save_pretrained(str(ONNX_TOKENIZER_DIR))
+            tokenizer = M2M100Tokenizer.from_pretrained(tokenizer_model)
+        tokenizer.save_pretrained(str(tokenizer_dir))
     except Exception as e:
         raise RuntimeError(
-            f"Failed to download/save tokenizer '{DEFAULT_TOKENIZER_MODEL}' to {ONNX_TOKENIZER_DIR}: {e}"
+            f"Failed to download/save tokenizer '{tokenizer_model}' to {tokenizer_dir}: {e}"
         ) from e
 
-    if not is_onnx_tokenizer_ready():
-        raise RuntimeError(f"Tokenizer files are incomplete at {ONNX_TOKENIZER_DIR}")
+    if not is_onnx_tokenizer_ready(selected):
+        raise RuntimeError(f"Tokenizer files are incomplete at {tokenizer_dir}")
+
+    set_onnx_family_cache(selected, tokenizer_ready=True)
 
     return {
         "ready": True,
-        "path": str(ONNX_TOKENIZER_DIR),
+        "family": selected,
+        "path": str(tokenizer_dir),
         "downloaded": True,
-        "model": DEFAULT_TOKENIZER_MODEL,
+        "model": tokenizer_model,
     }
 
 
@@ -301,11 +349,17 @@ def _download_file_from_drive(file_id: str, destination: Path) -> None:
                 handle.write(chunk)
 
 
-def download_onnx_models(selected_files: List[str] | None = None, include_tokenizer: bool = True) -> Dict[str, object]:
-    catalog = get_onnx_catalog(force_refresh=False)
+def download_onnx_models(
+    selected_files: List[str] | None = None,
+    include_tokenizer: bool = True,
+    family: str | None = None,
+) -> Dict[str, object]:
+    settings = _family_settings(family)
+    selected = settings["family"]
+    catalog = get_onnx_catalog(force_refresh=False, family=selected)
     available = {item["name"]: item for item in catalog["files"]}
 
-    requested = selected_files or DEFAULT_MODEL_FILES
+    requested = selected_files or settings["default_files"]
     requested = [_normalize_name(name) for name in requested if str(name).strip()]
 
     alias_map = {
@@ -335,7 +389,7 @@ def download_onnx_models(selected_files: List[str] | None = None, include_tokeni
     downloaded: List[Dict[str, str]] = []
     for filename in expanded_requested:
         file_id = available[filename]["id"]
-        destination = _destination_for_model(filename)
+        destination = _destination_for_model(filename, selected)
         progress.append(f"Downloading {filename}")
         _download_file_from_drive(file_id, destination)
         progress.append(f"Downloaded {filename}")
@@ -347,10 +401,15 @@ def download_onnx_models(selected_files: List[str] | None = None, include_tokeni
 
     tokenizer_info = None
     if include_tokenizer:
-        tokenizer_info = ensure_onnx_tokenizer(force_download=False)
+        tokenizer_info = ensure_onnx_tokenizer(force_download=False, family=selected)
+
+    downloaded_files = list_downloaded_onnx_model_files(selected)
+    tokenizer_ready = bool(tokenizer_info["ready"]) if isinstance(tokenizer_info, dict) else is_onnx_tokenizer_ready(selected)
+    set_onnx_family_cache(selected, downloaded_files=downloaded_files, tokenizer_ready=tokenizer_ready)
 
     return {
-        "folder_url": DRIVE_FOLDER_URL,
+        "family": selected,
+        "folder_url": settings["folder_url"],
         "requested_files": expanded_requested,
         "progress": progress,
         "downloaded": downloaded,

@@ -7,6 +7,8 @@ from app.services.pdf_service import ingest_pdf
 from app.services.rag_backend import (
     available_backends,
     load_backend,
+    select_backend,
+    ensure_active_backend_loaded,
     get_active_backend,
 )
 from app.config import (
@@ -33,11 +35,64 @@ def normalize(v):
     return v / norms
 
 
+def _get_backend_embedding_dim(backend) -> int | None:
+    if backend is None:
+        return None
+    if hasattr(backend, "index") and getattr(backend, "index", None) is not None and hasattr(backend.index, "d"):
+        try:
+            return int(backend.index.d)
+        except Exception:
+            pass
+    if hasattr(backend, "embeddings") and isinstance(getattr(backend, "embeddings", None), np.ndarray):
+        emb = backend.embeddings
+        if emb.ndim == 2 and emb.shape[0] > 0:
+            return int(emb.shape[1])
+    if hasattr(backend, "dim"):
+        try:
+            return int(backend.dim)
+        except Exception:
+            return None
+    return None
+
+
+def _rebuild_index_from_chunks(target_dim: int):
+    backend = ensure_active_backend_loaded()
+    if backend is None:
+        return
+
+    if hasattr(backend, "dim") and getattr(backend, "dim", None) != target_dim:
+        backend.dim = target_dim
+
+    backend.reset()
+
+    if not rag_meta["chunks"]:
+        save_state()
+        return
+
+    model = get_embed_model()
+    texts = [c["text"] for c in rag_meta["chunks"]]
+    embeddings = model.encode(texts, batch_size=32)
+    embeddings = normalize(embeddings)
+    backend.add(embeddings)
+    save_state()
+
+
+def _ensure_backend_query_dim(q_emb: np.ndarray):
+    backend = ensure_active_backend_loaded()
+    if backend is None:
+        return
+
+    query_dim = int(q_emb.shape[1])
+    backend_dim = _get_backend_embedding_dim(backend)
+    if backend_dim is not None and backend_dim != query_dim:
+        _rebuild_index_from_chunks(query_dim)
+
+
 # Initialize backend
 try:
-    load_backend("faiss")
+    select_backend("faiss")
 except Exception:
-    load_backend(available_backends()[0])
+    select_backend(available_backends()[0])
 
 
 # ---------- LOAD META ----------
@@ -49,7 +104,9 @@ else:
 
 
 def save_state():
-    backend = get_active_backend()
+    backend = ensure_active_backend_loaded()
+    if backend is None:
+        return
     backend.save()
     RAG_META_FILE.write_text(json.dumps(rag_meta, indent=2))
 
@@ -69,7 +126,9 @@ def rag_remove(doc_id: str):
     ]
 
     # Rebuild index from remaining chunks
-    backend = get_active_backend()
+    backend = ensure_active_backend_loaded()
+    if backend is None:
+        return False
     backend.reset()
 
     if rag_meta["chunks"]:
@@ -98,7 +157,9 @@ def rag_list():
 
 def rag_clear():
     global rag_meta
-    backend = get_active_backend()
+    backend = ensure_active_backend_loaded()
+    if backend is None:
+        return
     backend.reset()
     rag_meta = {"documents": {}, "chunks": []}
     save_state()
@@ -113,7 +174,9 @@ def rag_add(text: str):
     emb = model.encode([text])
     emb = normalize(emb)
 
-    backend = get_active_backend()
+    backend = ensure_active_backend_loaded()
+    if backend is None:
+        raise RuntimeError("No active RAG backend selected")
     backend.add(emb)
 
     rag_meta["documents"][doc_id] = {
@@ -142,7 +205,9 @@ def add_pdf_to_rag(pdf_path: str):
     embeddings = model.encode(chunks, batch_size=32)
     embeddings = normalize(embeddings)
 
-    backend = get_active_backend()
+    backend = ensure_active_backend_loaded()
+    if backend is None:
+        raise RuntimeError("No active RAG backend selected")
     backend.add(embeddings)
 
     doc_id = str(uuid.uuid4())
@@ -166,7 +231,7 @@ def add_pdf_to_rag(pdf_path: str):
 
 # ---------- RETRIEVE ----------
 
-def rag_retrieve(query: str, top_k=None, similarity_threshold=None):
+def rag_retrieve(query: str, top_k=None, similarity_threshold=None, strict: bool = False):
     if top_k is None:
         top_k = RAG_TOP_K
     if similarity_threshold is None:    
@@ -179,24 +244,44 @@ def rag_retrieve(query: str, top_k=None, similarity_threshold=None):
     q_emb = model.encode([query])
     q_emb = normalize(q_emb)
 
-    backend = get_active_backend()
-    sims, idxs = backend.search(q_emb, top_k)
+    backend = ensure_active_backend_loaded()
+    if backend is None:
+        return []
+    _ensure_backend_query_dim(q_emb)
+    backend = ensure_active_backend_loaded()
+    if backend is None:
+        return []
+    try:
+        sims, idxs = backend.search(q_emb, top_k)
+    except (AssertionError, ValueError):
+        _rebuild_index_from_chunks(int(q_emb.shape[1]))
+        backend = get_active_backend()
+        sims, idxs = backend.search(q_emb, top_k)
 
     results = []
+    fallback_candidates = []
 
     for sim, idx in zip(sims[0], idxs[0]):
         print("SIM SCORE:", sim)
 
         if idx >= len(rag_meta["chunks"]):
             continue
-        if sim < similarity_threshold:
-            continue
-
         chunk = rag_meta["chunks"][idx]
-        results.append({
+        item = {
             "text": chunk["text"],
             "source": rag_meta["documents"][chunk["doc_id"]]["source"],
             "similarity": float(sim)
-        })
+        }
+        fallback_candidates.append(item)
+        if sim >= similarity_threshold:
+            results.append(item)
 
-    return results
+    if results:
+        return results
+
+    if strict:
+        return []
+
+    # Fallback: if strict threshold yields nothing, still return top retrieved chunks
+    # so pipeline can answer from the nearest context instead of always out-of-bounds.
+    return fallback_candidates[:top_k]

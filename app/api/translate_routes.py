@@ -4,16 +4,17 @@ from flask import request, jsonify, Response, stream_with_context
 from . import bp
 import app.config as app_config
 from app.config import (
-    LANG_MAP, LANG_ALIASES, NLLB_LANG_MAP, 
-    USE_ONNX_TRANSLATOR, ONNX_LANG_MAP
+    LANG_MAP, LANG_ALIASES, NLLB_LANG_MAP,
+    USE_ONNX_TRANSLATOR, ONNX_MODEL_FAMILY,
+    ONNX_M2M_LANG_MAP, ONNX_NLLB_LANG_MAP,
 )
 from app.services.translator_service import (
     translate, detect_supported_language, 
-    unload_translator, preload_translator, local_translator_path
+    unload_translator, preload_translator, local_translator_path, is_translator_loaded
 )
 from app.services.onnx_translator_service import (
     translate_onnx, get_onnx_status, 
-    unload_onnx_translator, preload_onnx_translator, ensure_onnx_models
+    unload_onnx_translator, preload_onnx_translator, ensure_onnx_models, is_onnx_family_loaded
 )
 from app.services.onnx_model_download_service import (
     get_onnx_catalog, download_onnx_models, 
@@ -22,9 +23,30 @@ from app.services.onnx_model_download_service import (
 )
 
 ACTIVE_TRANSLATOR = "onnx" if USE_ONNX_TRANSLATOR else "nllb"
+ACTIVE_ONNX_FAMILY = ONNX_MODEL_FAMILY
+
+
+def _normalize_onnx_family(family: str | None) -> str:
+    selected = (family or ACTIVE_ONNX_FAMILY or "m2m").strip().lower()
+    return selected if selected in ("m2m", "nllb") else "m2m"
+
+
+def _onnx_backend_name(family: str | None = None) -> str:
+    selected = _normalize_onnx_family(family)
+    return "m2m_onnx" if selected == "m2m" else "nllb_onnx"
+
+
+def _onnx_lang_map_for_family(family: str | None = None) -> dict:
+    return ONNX_M2M_LANG_MAP if _normalize_onnx_family(family) == "m2m" else ONNX_NLLB_LANG_MAP
+
+
+def get_active_onnx_family() -> str:
+    return _normalize_onnx_family(ACTIVE_ONNX_FAMILY)
 
 def _get_effective_active_translator() -> str:
     global ACTIVE_TRANSLATOR
+    if ACTIVE_TRANSLATOR == "none":
+        return "none"
     if ACTIVE_TRANSLATOR == "onnx":
         try:
             if get_onnx_status().get("available"):
@@ -34,18 +56,45 @@ def _get_effective_active_translator() -> str:
         return "nllb"
     return "nllb"
 
+
+def _public_translator_name(translator_key: str) -> str:
+    if translator_key == "onnx":
+        return _onnx_backend_name(ACTIVE_ONNX_FAMILY)
+    if translator_key == "nllb":
+        return "nllb"
+    return "none"
+
 @bp.get("/translator_status")
 def ep_translator_status():
-    onnx_status = get_onnx_status()
-    active = _get_effective_active_translator()
+    global ACTIVE_ONNX_FAMILY
+    ACTIVE_ONNX_FAMILY = _normalize_onnx_family(ACTIVE_ONNX_FAMILY)
+    onnx_status = get_onnx_status(onnx_family=ACTIVE_ONNX_FAMILY)
+    onnx_status_m2m = get_onnx_status(onnx_family="m2m")
+    onnx_status_nllb = get_onnx_status(onnx_family="nllb")
+    active_key = _get_effective_active_translator()
+    active = _public_translator_name(active_key)
+    loaded_key = "none"
+    if is_onnx_family_loaded(ACTIVE_ONNX_FAMILY):
+        loaded_key = "onnx"
+    elif is_translator_loaded(app_config.NLLB_MODEL):
+        loaded_key = "nllb"
+
     nllb_path = local_translator_path(app_config.NLLB_MODEL)
     nllb_downloaded = nllb_path.exists() and any(nllb_path.iterdir())
-    onnx_downloaded_models = list_downloaded_onnx_model_files()
+    onnx_downloaded_models = list_downloaded_onnx_model_files(family=ACTIVE_ONNX_FAMILY)
     nllb_downloaded_models = [app_config.NLLB_MODEL] if nllb_downloaded else []
 
     return jsonify({
         "active_translator": active,
+        "active_translator_key": active_key,
+        "loaded_translator_key": loaded_key,
+        "onnx_backend_name": _onnx_backend_name(ACTIVE_ONNX_FAMILY),
+        "active_onnx_family": ACTIVE_ONNX_FAMILY,
         "onnx": onnx_status,
+        "onnx_families": {
+            "m2m": onnx_status_m2m,
+            "nllb": onnx_status_nllb,
+        },
         "nllb": {
             "available": True,
             "model": app_config.NLLB_MODEL,
@@ -54,9 +103,10 @@ def ep_translator_status():
         },
         "downloaded_models": {
             "onnx": onnx_downloaded_models,
+            _onnx_backend_name(ACTIVE_ONNX_FAMILY): onnx_downloaded_models,
             "nllb": nllb_downloaded_models,
             "all": [
-                *[f"onnx:{name}" for name in onnx_downloaded_models],
+                *[f"{_onnx_backend_name(ACTIVE_ONNX_FAMILY)}:{name}" for name in onnx_downloaded_models],
                 *[f"nllb:{name}" for name in nllb_downloaded_models],
             ],
         },
@@ -64,30 +114,64 @@ def ep_translator_status():
 
 @bp.post("/toggle_translator")
 def ep_toggle_translator():
-    global ACTIVE_TRANSLATOR
+    global ACTIVE_TRANSLATOR, ACTIVE_ONNX_FAMILY
     body = request.get_json() or {}
     use_onnx = body.get("use_onnx", _get_effective_active_translator() == "onnx")
-    onnx_status = get_onnx_status()
+    requested_onnx_family = _normalize_onnx_family(body.get("onnx_family"))
+    onnx_status = get_onnx_status(onnx_family=requested_onnx_family)
     if use_onnx and not onnx_status["available"]:
         return jsonify({"error": "ONNX models not available", "details": onnx_status}), 503
+    preload_details = None
+
+    try:
+        if use_onnx:
+            ACTIVE_ONNX_FAMILY = requested_onnx_family
+            unload_translator()
+            unload_onnx_translator(onnx_family=ACTIVE_ONNX_FAMILY)
+            ACTIVE_TRANSLATOR = "onnx"
+            preload_details = preload_onnx_translator(onnx_family=ACTIVE_ONNX_FAMILY)
+        else:
+            unload_onnx_translator(onnx_family=ACTIVE_ONNX_FAMILY)
+            ACTIVE_TRANSLATOR = "nllb"
+            preload_details = preload_translator()
+    except Exception as e:
+        return jsonify({"error": f"Failed to load translator backend: {e}"}), 503
     
-    if use_onnx:
-        unload_translator()
-        ACTIVE_TRANSLATOR = "onnx"
-    else:
-        unload_onnx_translator()
-        ACTIVE_TRANSLATOR = "nllb"
-    
-    return jsonify({"ok": True, "active_translator": ACTIVE_TRANSLATOR})
+    return jsonify({
+        "ok": True,
+        "active_translator": _public_translator_name(ACTIVE_TRANSLATOR),
+        "active_translator_key": ACTIVE_TRANSLATOR,
+        "onnx_backend_name": _onnx_backend_name(ACTIVE_ONNX_FAMILY),
+        "active_onnx_family": ACTIVE_ONNX_FAMILY,
+        "preloaded": True,
+        "preload_details": preload_details,
+    })
+
+
+@bp.post("/unload_translator")
+def ep_unload_translator():
+    global ACTIVE_TRANSLATOR
+    unload_translator()
+    unload_onnx_translator(onnx_family=ACTIVE_ONNX_FAMILY)
+    ACTIVE_TRANSLATOR = "none"
+    return jsonify({
+        "ok": True,
+        "active_translator": "none",
+        "active_translator_key": "none",
+        "onnx_backend_name": _onnx_backend_name(ACTIVE_ONNX_FAMILY),
+        "active_onnx_family": ACTIVE_ONNX_FAMILY,
+    })
 
 @bp.post("/translate")
 def ep_translate():
+    global ACTIVE_ONNX_FAMILY
     body = request.get_json() or {}
     text = body.get("text")
     target = (body.get("target") or "en").lower()
     stream = bool(body.get("stream", True))
     max_tokens = int(body.get("max_new_tokens", 256))
     use_onnx = body.get("use_onnx", USE_ONNX_TRANSLATOR)
+    onnx_family = _normalize_onnx_family(body.get("onnx_family") or ACTIVE_ONNX_FAMILY)
 
     if not text:
         return jsonify({"error": "text required"}), 400
@@ -97,15 +181,18 @@ def ep_translate():
         return jsonify({"error": "could not auto-detect a supported language"}), 400
 
     if use_onnx:
-        target_map = ONNX_LANG_MAP
+        target_map = _onnx_lang_map_for_family(onnx_family)
         translate_fn = translate_onnx
-        backend = "onnx"
+        backend_key = "onnx"
+        backend = _onnx_backend_name(onnx_family)
         src_code = src_lang_key
-        if src_lang_key not in ONNX_LANG_MAP:
-            return jsonify({"error": f"Language '{src_lang_key}' not supported by ONNX"}), 400
+        if src_lang_key not in target_map:
+            return jsonify({"error": f"Language '{src_lang_key}' not supported by ONNX family '{onnx_family}'"}), 400
+        ACTIVE_ONNX_FAMILY = onnx_family
     else:
         target_map = NLLB_LANG_MAP
         translate_fn = translate
+        backend_key = "nllb"
         backend = "nllb"
         src_code, _ = LANG_MAP[src_lang_key]
 
@@ -126,19 +213,20 @@ def ep_translate():
     if not stream:
         translated_sentences = []
         for sent in iter_sentences(text):
-            translated = translate_fn(sent, src_code, target_code, max_tokens)
+            translated = translate_fn(sent, src_code, target_code, max_tokens, onnx_family=onnx_family) if use_onnx else translate_fn(sent, src_code, target_code, max_tokens)
             translated_sentences.append({"source": sent, "translated": translated})
         combined = " ".join(item["translated"] for item in translated_sentences)
         return jsonify({
             "translated_text": combined,
             "detected_lang": src_lang_key,
-            "backend": backend
+            "backend": backend,
+            "backend_key": backend_key,
         })
 
     def event_stream():
-        yield f"data: {json.dumps({'type': 'meta', 'backend': backend})}\n\n"
+        yield f"data: {json.dumps({'type': 'meta', 'backend': backend, 'backend_key': backend_key, 'onnx_family': onnx_family if use_onnx else None})}\n\n"
         for idx, sent in enumerate(iter_sentences(text), start=1):
-            translated = translate_fn(sent, src_code, target_code, max_tokens)
+            translated = translate_fn(sent, src_code, target_code, max_tokens, onnx_family=onnx_family) if use_onnx else translate_fn(sent, src_code, target_code, max_tokens)
             yield f"data: {json.dumps({'type': 'sentence', 'index': idx, 'translated': translated})}\n\n"
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
@@ -149,11 +237,77 @@ def ep_translate():
 @bp.get("/api/onnx_models/catalog")
 def ep_onnx_models_catalog():
     refresh = str(request.args.get("refresh", "false")).lower() in ("1", "true", "yes")
-    return jsonify({"ok": True, **get_onnx_catalog(force_refresh=refresh)})
+    family = (request.args.get("family") or ONNX_MODEL_FAMILY).strip().lower()
+    catalog = get_onnx_catalog(force_refresh=refresh, family=family)
+    tokenizer_ready = False
+    tokenizer_error = None
+    try:
+        from app.services.onnx_model_download_service import is_onnx_tokenizer_ready
+        tokenizer_ready = bool(is_onnx_tokenizer_ready(family=family))
+    except Exception as tokenizer_exc:
+        tokenizer_error = str(tokenizer_exc)
+    downloaded_files = list_downloaded_onnx_model_files(family=family)
+    downloaded_set = set(downloaded_files)
+    downloaded_name_set = {item.split("/")[-1] for item in downloaded_files}
+    default_files = catalog.get("default_files") or []
+    all_default_downloaded = all(
+        (
+            file_name in downloaded_set
+            or f"encoder/{file_name}" in downloaded_set
+            or f"decoder/{file_name}" in downloaded_set
+            or f"lm_head/{file_name}" in downloaded_set
+        )
+        for file_name in default_files
+    )
+
+    family_files_status = []
+    for file_item in (catalog.get("files") or []):
+        file_name = str(file_item.get("name") or "")
+        if not file_name:
+            continue
+        is_downloaded = (
+            file_name in downloaded_set
+            or f"encoder/{file_name}" in downloaded_set
+            or f"decoder/{file_name}" in downloaded_set
+            or f"lm_head/{file_name}" in downloaded_set
+            or file_name in downloaded_name_set
+        )
+        family_files_status.append({
+            "name": file_name,
+            "downloaded": bool(is_downloaded),
+        })
+
+    total_family_files = len(family_files_status)
+    downloaded_family_files = sum(1 for item in family_files_status if item["downloaded"])
+    all_family_downloaded = total_family_files > 0 and downloaded_family_files == total_family_files
+
+    return jsonify({
+        "ok": True,
+        **catalog,
+        "downloaded_files": downloaded_files,
+        "all_default_downloaded": all_default_downloaded,
+        "tokenizer_ready": tokenizer_ready,
+        "tokenizer_error": tokenizer_error,
+        "family_files_status": family_files_status,
+        "total_family_files": total_family_files,
+        "downloaded_family_files": downloaded_family_files,
+        "all_family_downloaded": all_family_downloaded,
+    })
 
 @bp.post("/onnx_models/download")
 @bp.post("/api/onnx_models/download")
 def ep_onnx_models_download():
     body = request.get_json() or {}
     files = body.get("files")
-    return jsonify({"ok": True, **download_onnx_models(selected_files=files)})
+    family = (body.get("family") or ONNX_MODEL_FAMILY).strip().lower()
+    return jsonify({"ok": True, **download_onnx_models(selected_files=files, family=family)})
+
+
+@bp.post("/onnx_tokenizer/ensure")
+@bp.post("/api/onnx_tokenizer/ensure")
+def ep_onnx_tokenizer_ensure():
+    body = request.get_json(silent=True) or {}
+    family = (body.get("family") or ONNX_MODEL_FAMILY).strip().lower()
+    force_download = bool(body.get("force_download", False))
+    result = ensure_onnx_tokenizer(force_download=force_download, family=family)
+    return jsonify({"ok": True, **result})

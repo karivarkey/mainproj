@@ -17,17 +17,18 @@ current_llm = None
 current_name: str | None = None
 current_path: Path | None = None
 
+
+def canonical_llm_name(model_name: str) -> str:
+    safe = model_name.replace("/", "__").strip()
+    if safe.endswith(".gguf"):
+        return safe
+    return f"{safe}.gguf"
+
 def get_current_name():
     return current_name
 
 def local_gguf_path(model_name: str) -> Path:
-    safe = model_name.replace("/", "__").strip()
-
-    # Prevent double-extension bug: foo.gguf.gguf
-    if safe.endswith(".gguf"):
-        return LLM_DIR / safe
-
-    return LLM_DIR / f"{safe}.gguf"
+    return LLM_DIR / canonical_llm_name(model_name)
 
 
 def list_local_llms() -> list[str]:
@@ -40,7 +41,11 @@ def list_local_llms() -> list[str]:
 def list_all_llms() -> list[str]:
     """Merge cache list + disk list (so manual copied models also show)."""
     from_disk = set(list_local_llms())
-    from_cache = set(model_cache.get("llms", []))
+    from_cache = {
+        canonical_llm_name(name)
+        for name in model_cache.get("llms", [])
+        if isinstance(name, str) and name.strip()
+    }
     return sorted(from_disk.union(from_cache))
 
 
@@ -49,6 +54,7 @@ def download_gguf(url: str, model_name: str) -> Path:
     import os
 
     LLM_DIR.mkdir(parents=True, exist_ok=True)
+    model_name = canonical_llm_name(model_name)
     dest = local_gguf_path(model_name)
 
     if dest.exists():
@@ -72,8 +78,9 @@ def download_gguf(url: str, model_name: str) -> Path:
                         print(
                             f"{pct}% {downloaded/1e6:.1f}/{total/1e6:.1f} MB", end="\r")
 
-    model_cache["llms"].append(model_name)
-    save_cache(model_cache)
+    if model_name not in model_cache["llms"]:
+        model_cache["llms"].append(model_name)
+        save_cache(model_cache)
     return dest
 
 
@@ -90,6 +97,7 @@ def load_llm(model_name: str, n_ctx: int = None, n_gpu_layers: int = None):
         print(f"[LLM] CPU_ONLY mode enabled, forcing n_gpu_layers=0")
         n_gpu_layers = 0
 
+    model_name = canonical_llm_name(model_name)
     gguf_path = local_gguf_path(model_name)
     if not gguf_path.exists():
         raise FileNotFoundError(gguf_path)

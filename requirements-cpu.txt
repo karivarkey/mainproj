@@ -27,4 +27,5 @@ safetensors
 
 # --- Evaluation ---
 sacrebleu
+datasets>=2.14,<4
 
