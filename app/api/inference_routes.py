@@ -5,7 +5,13 @@ from flask import request, jsonify, Response, stream_with_context
 from . import bp
 from .utils import _clean_generation, _clean_rag_context, _ensure_complete_sentence
 from .translate_routes import _get_effective_active_translator, get_active_onnx_family, _onnx_lang_map_for_family
-from app.config import LANG_MAP, LANG_ALIASES, LLM_DEFAULT_MAX_TOKENS
+from app.config import (
+    LANG_MAP,
+    LANG_ALIASES,
+    LLM_DEFAULT_MAX_TOKENS,
+    TRANSLATION_MAX_NEW_TOKENS,
+    TRANSLATION_MIN_NEW_TOKENS,
+)
 from app.services.llm_service import llm_generate, llm_generate_stream
 from app.services.translator_service import translate, detect_supported_language
 from app.services.onnx_translator_service import translate_onnx
@@ -26,6 +32,12 @@ def _is_no_db_sentence(text: str) -> bool:
     cleaned = cleaned.rstrip(".!?। ")
     target = NO_DB_ANSWER_EN.lower().rstrip(".!?। ")
     return cleaned == target
+
+
+def _translation_token_limit_for_text(text: str) -> int:
+    words = max(1, len((text or "").split()))
+    adaptive = max(TRANSLATION_MIN_NEW_TOKENS, min(TRANSLATION_MAX_NEW_TOKENS, words * 3))
+    return adaptive
 
 
 def _build_grounded_prompt(question: str, rag_docs: list) -> str:
@@ -118,7 +130,12 @@ def ep_infer():
         backend = "nllb"
 
     def _translate_pipe(t, s, tg):
-        return translate_onnx(t, s, tg, onnx_family=onnx_family) if backend == "onnx" else translate(t, s, tg)
+        token_limit = _translation_token_limit_for_text(t)
+        return (
+            translate_onnx(t, s, tg, max_tokens=token_limit, onnx_family=onnx_family)
+            if backend == "onnx"
+            else translate(t, s, tg, max_tokens=token_limit)
+        )
 
     # 1. To English
     _t0 = time.perf_counter()

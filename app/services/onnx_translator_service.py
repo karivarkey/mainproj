@@ -8,6 +8,10 @@ from app.config import (
     ONNX_FAMILY_CONFIG,
     ONNX_M2M_LANG_MAP,
     ONNX_NLLB_LANG_MAP,
+    ONNX_INTRA_OP_THREADS,
+    ONNX_INTER_OP_THREADS,
+    ONNX_ENABLE_ALL_OPTIMIZATIONS,
+    ONNX_VERBOSE_LOGS,
 )
 
 # Global translator cache
@@ -22,6 +26,11 @@ except ImportError:
     TOKENIZER_AVAILABLE = False
 
 device = "cpu"  # ONNX Runtime with CPU for now
+
+
+def _log(message: str):
+    if ONNX_VERBOSE_LOGS:
+        print(message)
 
 
 def _normalize_family(onnx_family: str | None = None) -> str:
@@ -202,9 +211,21 @@ def get_onnx_session(model_path: str, providers=None):
         providers = ["CPUExecutionProvider"]
     
     try:
-        session = ort.InferenceSession(model_path, providers=providers)
+        session_options = ort.SessionOptions()
+        session_options.intra_op_num_threads = ONNX_INTRA_OP_THREADS
+        session_options.inter_op_num_threads = ONNX_INTER_OP_THREADS
+        session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        session_options.graph_optimization_level = (
+            ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            if ONNX_ENABLE_ALL_OPTIMIZATIONS
+            else ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
+        )
+        session = ort.InferenceSession(model_path, sess_options=session_options, providers=providers)
         onnx_translator_cache[cache_key] = session
-        print(f"[ONNX] Loaded session for {Path(model_path).name}")
+        _log(
+            f"[ONNX] Loaded session for {Path(model_path).name} "
+            f"(intra={ONNX_INTRA_OP_THREADS}, inter={ONNX_INTER_OP_THREADS})"
+        )
         return session
     except Exception as e:
         raise RuntimeError(f"Failed to load ONNX model {model_path}: {e}") from e
@@ -263,7 +284,7 @@ def encode_with_onnx(text: str, src_lang: str, onnx_family: str | None = None) -
     # Map short codes to M2M-100 codes
     src_code = _lang_map_for_family(family).get(src_lang, src_lang)
     
-    print(f"[ONNX:{family}] Encoding {src_lang} ({src_code}): {text[:50]}...")
+    _log(f"[ONNX:{family}] Encoding {src_lang} ({src_code}): {text[:50]}...")
     
     # Tokenize with forced language token
     tok.src_lang = src_code
@@ -314,7 +335,7 @@ def decode_with_onnx(encoder_outputs: dict, tgt_lang: str, max_tokens: int = 256
     encoder_attention_mask = encoder_outputs["attention_mask"]
     
     tgt_code = _lang_map_for_family(family).get(tgt_lang, tgt_lang)
-    print(f"[ONNX:{family}] Decoding to {tgt_lang} ({tgt_code})...")
+    _log(f"[ONNX:{family}] Decoding to {tgt_lang} ({tgt_code})...")
     
     # Get forced BOS token (language ID)
     try:
@@ -326,9 +347,9 @@ def decode_with_onnx(encoder_outputs: dict, tgt_lang: str, max_tokens: int = 256
             forced_bos = int(tok.convert_tokens_to_ids(tgt_code))
             if forced_bos < 0:
                 raise ValueError(f"Unknown target language token: {tgt_code}")
-        print(f"[ONNX:{family}] Forced BOS token ID: {forced_bos}")
+        _log(f"[ONNX:{family}] Forced BOS token ID: {forced_bos}")
     except Exception as e:
-        print(f"[ONNX:{family}] Warning: Could not get language ID for {tgt_code}: {e}")
+        _log(f"[ONNX:{family}] Warning: Could not get language ID for {tgt_code}: {e}")
         forced_bos = tok.eos_token_id
     
     # Initialize decoder input with EOS token
@@ -362,7 +383,7 @@ def decode_with_onnx(encoder_outputs: dict, tgt_lang: str, max_tokens: int = 256
             dec_hidden = decoder_outputs[0].astype(np.float32)  # (batch, seq_len, hidden_size)
             
         except Exception as e:
-            print(f"[ONNX:{family}] Decoder error at step {step}: {e}")
+            _log(f"[ONNX:{family}] Decoder error at step {step}: {e}")
             break
         
         # Get last hidden state
@@ -374,13 +395,13 @@ def decode_with_onnx(encoder_outputs: dict, tgt_lang: str, max_tokens: int = 256
             lm_head_outputs = lm_head_session.run(None, lm_head_inputs)
             logits = lm_head_outputs[0]  # (batch, 1, vocab_size)
         except Exception as e:
-            print(f"[ONNX:{family}] LM head error at step {step}: {e}")
+            _log(f"[ONNX:{family}] LM head error at step {step}: {e}")
             break
         
         # Force first token to be language ID
         if decoder_input_ids.shape[1] == 1:
             next_token = np.array([[forced_bos]], dtype=np.int64)
-            print(f"[ONNX:{family}] Forced first token: {forced_bos} (language ID)")
+            _log(f"[ONNX:{family}] Forced first token: {forced_bos} (language ID)")
         else:
             # Greedy: pick max logit
             next_token = np.argmax(logits, axis=-1).astype(np.int64)
@@ -390,12 +411,12 @@ def decode_with_onnx(encoder_outputs: dict, tgt_lang: str, max_tokens: int = 256
         
         # Stop if EOS
         if next_token.item() == tok.eos_token_id:
-            print(f"[ONNX:{family}] Generated {decoder_input_ids.shape[1]} tokens (EOS reached)")
+            _log(f"[ONNX:{family}] Generated {decoder_input_ids.shape[1]} tokens (EOS reached)")
             break
     
     # Decode entire sequence
     output_text = tok.batch_decode(decoder_input_ids, skip_special_tokens=True)[0]
-    print(
+    _log(
         f"[ONNX:{family}] Output: {output_text[:100]}..."
         if len(output_text) > 100
         else f"[ONNX:{family}] Output: {output_text}\n"
@@ -431,7 +452,7 @@ def translate_onnx(text: str, src_lang: str, tgt_lang: str, max_tokens: int = 25
         translated = decode_with_onnx(encoder_outputs, tgt_lang, max_tokens, family)
         return translated
     except Exception as e:
-        print(f"[ONNX:{family}] Translation failed: {e}")
+        _log(f"[ONNX:{family}] Translation failed: {e}")
         raise
 
 
@@ -444,7 +465,7 @@ def unload_onnx_translator(onnx_family: str | None = None):
         onnx_tokenizer_cache.clear()
     else:
         onnx_tokenizer_cache.pop(family, None)
-    print(f"[ONNX:{family}] Sessions unloaded.")
+    _log(f"[ONNX:{family}] Sessions unloaded.")
 
 
 def preload_onnx_translator(onnx_family: str | None = None):

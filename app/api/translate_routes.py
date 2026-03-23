@@ -7,6 +7,7 @@ from app.config import (
     LANG_MAP, LANG_ALIASES, NLLB_LANG_MAP,
     USE_ONNX_TRANSLATOR, ONNX_MODEL_FAMILY,
     ONNX_M2M_LANG_MAP, ONNX_NLLB_LANG_MAP,
+    TRANSLATION_MAX_NEW_TOKENS, TRANSLATION_MIN_NEW_TOKENS,
 )
 from app.services.translator_service import (
     translate, detect_supported_language, 
@@ -24,6 +25,11 @@ from app.services.onnx_model_download_service import (
 
 ACTIVE_TRANSLATOR = "onnx" if USE_ONNX_TRANSLATOR else "nllb"
 ACTIVE_ONNX_FAMILY = ONNX_MODEL_FAMILY
+
+
+def _translation_token_limit_for_text(text: str) -> int:
+    words = max(1, len((text or "").split()))
+    return max(TRANSLATION_MIN_NEW_TOKENS, min(TRANSLATION_MAX_NEW_TOKENS, words * 3))
 
 
 def _normalize_onnx_family(family: str | None) -> str:
@@ -169,7 +175,7 @@ def ep_translate():
     text = body.get("text")
     target = (body.get("target") or "en").lower()
     stream = bool(body.get("stream", True))
-    max_tokens = int(body.get("max_new_tokens", 256))
+    requested_max_tokens = int(body.get("max_new_tokens", TRANSLATION_MAX_NEW_TOKENS))
     use_onnx = body.get("use_onnx", USE_ONNX_TRANSLATOR)
     onnx_family = _normalize_onnx_family(body.get("onnx_family") or ACTIVE_ONNX_FAMILY)
 
@@ -198,6 +204,7 @@ def ep_translate():
 
     target_key = LANG_ALIASES.get(target, target)
     target_code = target_map.get(target_key, target_key)
+    max_tokens = min(requested_max_tokens, _translation_token_limit_for_text(text))
 
     sentence_end_re = re.compile(r"(.+?[.!?](?:\"|'|”)?)(\s+|$)", re.S)
     def iter_sentences(blob: str):
@@ -211,11 +218,11 @@ def ep_translate():
         if buffer.strip(): yield buffer.strip()
 
     if not stream:
-        translated_sentences = []
-        for sent in iter_sentences(text):
-            translated = translate_fn(sent, src_code, target_code, max_tokens, onnx_family=onnx_family) if use_onnx else translate_fn(sent, src_code, target_code, max_tokens)
-            translated_sentences.append({"source": sent, "translated": translated})
-        combined = " ".join(item["translated"] for item in translated_sentences)
+        combined = (
+            translate_fn(text, src_code, target_code, max_tokens, onnx_family=onnx_family)
+            if use_onnx
+            else translate_fn(text, src_code, target_code, max_tokens)
+        )
         return jsonify({
             "translated_text": combined,
             "detected_lang": src_lang_key,
@@ -226,7 +233,12 @@ def ep_translate():
     def event_stream():
         yield f"data: {json.dumps({'type': 'meta', 'backend': backend, 'backend_key': backend_key, 'onnx_family': onnx_family if use_onnx else None})}\n\n"
         for idx, sent in enumerate(iter_sentences(text), start=1):
-            translated = translate_fn(sent, src_code, target_code, max_tokens, onnx_family=onnx_family) if use_onnx else translate_fn(sent, src_code, target_code, max_tokens)
+            sentence_token_limit = min(max_tokens, _translation_token_limit_for_text(sent))
+            translated = (
+                translate_fn(sent, src_code, target_code, sentence_token_limit, onnx_family=onnx_family)
+                if use_onnx
+                else translate_fn(sent, src_code, target_code, sentence_token_limit)
+            )
             yield f"data: {json.dumps({'type': 'sentence', 'index': idx, 'translated': translated})}\n\n"
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 

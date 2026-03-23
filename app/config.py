@@ -138,6 +138,12 @@ ONNX_NLLB_LANG_MAP = dict(NLLB_LANG_MAP)
 ONNX_LANG_MAP = ONNX_M2M_LANG_MAP if ONNX_MODEL_FAMILY == "m2m" else ONNX_NLLB_LANG_MAP
 ONNX_BACKEND_NAME = "m2m_onnx" if ONNX_MODEL_FAMILY == "m2m" else "nllb_onnx"
 
+# ONNX Runtime CPU tuning (important for edge devices like Raspberry Pi)
+ONNX_INTRA_OP_THREADS = max(1, int(os.environ.get("ONNX_INTRA_OP_THREADS", str(min(4, os.cpu_count() or 1)))))
+ONNX_INTER_OP_THREADS = max(1, int(os.environ.get("ONNX_INTER_OP_THREADS", "1")))
+ONNX_ENABLE_ALL_OPTIMIZATIONS = os.environ.get("ONNX_ENABLE_ALL_OPTIMIZATIONS", "true").lower() in ("1", "true", "yes")
+ONNX_VERBOSE_LOGS = os.environ.get("ONNX_VERBOSE_LOGS", "false").lower() in ("1", "true", "yes")
+
 # Language configuration used by /infer. LANG_CONF is the single source of truth; LANG_MAP and
 # LANG_ALIASES are derived for backwards compatibility and convenience.
 LANG_CONF = {
@@ -206,6 +212,10 @@ LLM_DEFAULT_TOP_P = 0.92
 LLM_DEFAULT_TOP_K = 40
 LLM_DEFAULT_REPEAT_PENALTY = 1.15
 LLM_DEFAULT_MAX_TOKENS = 384
+
+# Translator generation limits. Lower defaults keep sentence-level streaming snappy.
+TRANSLATION_MAX_NEW_TOKENS = max(16, int(os.environ.get("TRANSLATION_MAX_NEW_TOKENS", "96")))
+TRANSLATION_MIN_NEW_TOKENS = max(8, int(os.environ.get("TRANSLATION_MIN_NEW_TOKENS", "24")))
 
 def ensure_dirs():
     """Create required directories if they don't exist."""
