@@ -11,6 +11,8 @@ from app.config import (
     LLM_DEFAULT_MAX_TOKENS,
     TRANSLATION_MAX_NEW_TOKENS,
     TRANSLATION_MIN_NEW_TOKENS,
+    TRANSLATION_SHORT_TEXT_MAX_NEW_TOKENS,
+    TRANSLATION_SHORT_TEXT_WORDS,
 )
 from app.services.llm_service import llm_generate, llm_generate_stream
 from app.services.translator_service import translate, detect_supported_language
@@ -36,7 +38,10 @@ def _is_no_db_sentence(text: str) -> bool:
 
 def _translation_token_limit_for_text(text: str) -> int:
     words = max(1, len((text or "").split()))
-    adaptive = max(TRANSLATION_MIN_NEW_TOKENS, min(TRANSLATION_MAX_NEW_TOKENS, words * 3))
+    if words <= TRANSLATION_SHORT_TEXT_WORDS:
+        adaptive = min(TRANSLATION_SHORT_TEXT_MAX_NEW_TOKENS, max(TRANSLATION_MIN_NEW_TOKENS, words * 2 + 6))
+    else:
+        adaptive = max(TRANSLATION_MIN_NEW_TOKENS, min(TRANSLATION_MAX_NEW_TOKENS, words * 2))
     return adaptive
 
 

@@ -7,7 +7,10 @@ from app.config import (
     LANG_MAP, LANG_ALIASES, NLLB_LANG_MAP,
     USE_ONNX_TRANSLATOR, ONNX_MODEL_FAMILY,
     ONNX_M2M_LANG_MAP, ONNX_NLLB_LANG_MAP,
-    TRANSLATION_MAX_NEW_TOKENS, TRANSLATION_MIN_NEW_TOKENS,
+    TRANSLATION_MAX_NEW_TOKENS,
+    TRANSLATION_MIN_NEW_TOKENS,
+    TRANSLATION_SHORT_TEXT_MAX_NEW_TOKENS,
+    TRANSLATION_SHORT_TEXT_WORDS,
 )
 from app.services.translator_service import (
     translate, detect_supported_language, 
@@ -29,7 +32,9 @@ ACTIVE_ONNX_FAMILY = ONNX_MODEL_FAMILY
 
 def _translation_token_limit_for_text(text: str) -> int:
     words = max(1, len((text or "").split()))
-    return max(TRANSLATION_MIN_NEW_TOKENS, min(TRANSLATION_MAX_NEW_TOKENS, words * 3))
+    if words <= TRANSLATION_SHORT_TEXT_WORDS:
+        return min(TRANSLATION_SHORT_TEXT_MAX_NEW_TOKENS, max(TRANSLATION_MIN_NEW_TOKENS, words * 2 + 6))
+    return max(TRANSLATION_MIN_NEW_TOKENS, min(TRANSLATION_MAX_NEW_TOKENS, words * 2))
 
 
 def _normalize_onnx_family(family: str | None) -> str:

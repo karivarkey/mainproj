@@ -214,8 +214,15 @@ LLM_DEFAULT_REPEAT_PENALTY = 1.15
 LLM_DEFAULT_MAX_TOKENS = 384
 
 # Translator generation limits. Lower defaults keep sentence-level streaming snappy.
-TRANSLATION_MAX_NEW_TOKENS = max(16, int(os.environ.get("TRANSLATION_MAX_NEW_TOKENS", "96")))
-TRANSLATION_MIN_NEW_TOKENS = max(8, int(os.environ.get("TRANSLATION_MIN_NEW_TOKENS", "24")))
+TRANSLATION_MAX_NEW_TOKENS = max(16, int(os.environ.get("TRANSLATION_MAX_NEW_TOKENS", "48")))
+TRANSLATION_MIN_NEW_TOKENS = max(6, int(os.environ.get("TRANSLATION_MIN_NEW_TOKENS", "12")))
+TRANSLATION_SHORT_TEXT_MAX_NEW_TOKENS = max(12, int(os.environ.get("TRANSLATION_SHORT_TEXT_MAX_NEW_TOKENS", "28")))
+TRANSLATION_SHORT_TEXT_WORDS = max(4, int(os.environ.get("TRANSLATION_SHORT_TEXT_WORDS", "14")))
+
+# ONNX decode safeguards for low-power CPUs
+ONNX_TRANSLATION_MAX_SOURCE_TOKENS = max(64, int(os.environ.get("ONNX_TRANSLATION_MAX_SOURCE_TOKENS", "192")))
+ONNX_TRANSLATION_LENGTH_RATIO = max(1.0, float(os.environ.get("ONNX_TRANSLATION_LENGTH_RATIO", "1.35")))
+ONNX_TRANSLATION_MIN_STEPS = max(4, int(os.environ.get("ONNX_TRANSLATION_MIN_STEPS", "8")))
 
 def ensure_dirs():
     """Create required directories if they don't exist."""

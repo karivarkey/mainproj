@@ -12,6 +12,9 @@ from app.config import (
     ONNX_INTER_OP_THREADS,
     ONNX_ENABLE_ALL_OPTIMIZATIONS,
     ONNX_VERBOSE_LOGS,
+    ONNX_TRANSLATION_MAX_SOURCE_TOKENS,
+    ONNX_TRANSLATION_LENGTH_RATIO,
+    ONNX_TRANSLATION_MIN_STEPS,
 )
 
 # Global translator cache
@@ -267,6 +270,17 @@ def _cast_inputs_for_session(session: ort.InferenceSession, inputs: dict) -> dic
     return casted
 
 
+def _punctuation_token_ids(tok) -> set[int]:
+    ids = set()
+    for symbol in (".", "!", "?", "।"):
+        try:
+            for token_id in tok.encode(symbol, add_special_tokens=False):
+                ids.add(int(token_id))
+        except Exception:
+            pass
+    return ids
+
+
 def encode_with_onnx(text: str, src_lang: str, onnx_family: str | None = None) -> dict:
     """
     Encode input text using ONNX encoder.
@@ -288,7 +302,13 @@ def encode_with_onnx(text: str, src_lang: str, onnx_family: str | None = None) -
     
     # Tokenize with forced language token
     tok.src_lang = src_code
-    inputs = tok(text, return_tensors="pt", max_length=512, truncation=True, padding=True)
+    inputs = tok(
+        text,
+        return_tensors="pt",
+        max_length=ONNX_TRANSLATION_MAX_SOURCE_TOKENS,
+        truncation=True,
+        padding=True,
+    )
     
     # Run encoder
     models_dir = get_onnx_models_dir(family)
@@ -312,6 +332,7 @@ def encode_with_onnx(text: str, src_lang: str, onnx_family: str | None = None) -
         "family": family,
         "last_hidden_state": encoder_outputs[0],  # (batch, seq_len, hidden_size)
         "attention_mask": attention_mask,
+        "source_token_count": int(np.sum(attention_mask)),
         "tokenizer": tok,
     }
 
@@ -333,6 +354,7 @@ def decode_with_onnx(encoder_outputs: dict, tgt_lang: str, max_tokens: int = 256
     family = _normalize_family(onnx_family or encoder_outputs.get("family"))
     encoder_hidden = encoder_outputs["last_hidden_state"].astype(np.float32)
     encoder_attention_mask = encoder_outputs["attention_mask"]
+    source_token_count = int(encoder_outputs.get("source_token_count", 0))
     
     tgt_code = _lang_map_for_family(family).get(tgt_lang, tgt_lang)
     _log(f"[ONNX:{family}] Decoding to {tgt_lang} ({tgt_code})...")
@@ -352,8 +374,8 @@ def decode_with_onnx(encoder_outputs: dict, tgt_lang: str, max_tokens: int = 256
         _log(f"[ONNX:{family}] Warning: Could not get language ID for {tgt_code}: {e}")
         forced_bos = tok.eos_token_id
     
-    # Initialize decoder input with EOS token
-    decoder_input_ids = np.array([[tok.eos_token_id]], dtype=np.int64)
+    # Start directly with target language token to avoid a wasted decode step.
+    decoder_input_ids = np.array([[forced_bos]], dtype=np.int64)
     
     models_dir = get_onnx_models_dir(family)
     model_names = _active_model_names(family)
@@ -363,8 +385,14 @@ def decode_with_onnx(encoder_outputs: dict, tgt_lang: str, max_tokens: int = 256
     decoder_session = get_onnx_session(str(decoder_path))
     lm_head_session = get_onnx_session(str(lm_head_path))
     
+    effective_max_tokens = min(
+        max_tokens,
+        max(ONNX_TRANSLATION_MIN_STEPS + 2, int(source_token_count * ONNX_TRANSLATION_LENGTH_RATIO) + 6),
+    )
+    sentence_end_ids = _punctuation_token_ids(tok)
+
     # Greedy decoding loop
-    for step in range(max_tokens):
+    for step in range(effective_max_tokens):
         try:
             # Prepare decoder inputs with attention mask (must be int64)
             decoder_attention_mask = np.ones_like(decoder_input_ids, dtype=np.int64)
@@ -398,20 +426,19 @@ def decode_with_onnx(encoder_outputs: dict, tgt_lang: str, max_tokens: int = 256
             _log(f"[ONNX:{family}] LM head error at step {step}: {e}")
             break
         
-        # Force first token to be language ID
-        if decoder_input_ids.shape[1] == 1:
-            next_token = np.array([[forced_bos]], dtype=np.int64)
-            _log(f"[ONNX:{family}] Forced first token: {forced_bos} (language ID)")
-        else:
-            # Greedy: pick max logit
-            next_token = np.argmax(logits, axis=-1).astype(np.int64)
+        # Greedy: pick max logit
+        next_token = np.argmax(logits, axis=-1).astype(np.int64)
         
         # Concatenate token to sequence
         decoder_input_ids = np.concatenate([decoder_input_ids, next_token], axis=1)
         
         # Stop if EOS
-        if next_token.item() == tok.eos_token_id:
+        next_id = int(next_token.item())
+        if next_id == tok.eos_token_id:
             _log(f"[ONNX:{family}] Generated {decoder_input_ids.shape[1]} tokens (EOS reached)")
+            break
+        if step >= ONNX_TRANSLATION_MIN_STEPS and next_id in sentence_end_ids:
+            _log(f"[ONNX:{family}] Generated {decoder_input_ids.shape[1]} tokens (sentence-end reached)")
             break
     
     # Decode entire sequence
