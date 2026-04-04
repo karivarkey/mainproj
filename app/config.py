@@ -26,8 +26,8 @@ NLLB_MODEL = "facebook/nllb-200-distilled-600M"
 TRANSLATOR_QUANTIZE = os.environ.get("TRANSLATOR_QUANTIZE", "8bit")  # 'none', '8bit', or '4bit'
 
 # ONNX Translator configuration
-USE_ONNX_TRANSLATOR = os.environ.get("USE_ONNX_TRANSLATOR", "true").lower() in ("1", "true", "yes")  # Default to ONNX
-ONNX_MODEL_FAMILY = os.environ.get("ONNX_MODEL_FAMILY", "m2m").strip().lower()  # m2m | nllb
+USE_ONNX_TRANSLATOR = True #efault to ONNX
+ONNX_MODEL_FAMILY = "nllb"
 if ONNX_MODEL_FAMILY not in ("m2m", "nllb"):
     ONNX_MODEL_FAMILY = "m2m"
 
